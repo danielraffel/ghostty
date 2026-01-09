@@ -2861,6 +2861,11 @@ pub fn lineIterator(self: *const Screen, start: Pin) LineIterator {
     };
 }
 
+pub const CursorPath = struct {
+    x: isize,
+    y: isize,
+};
+
 /// Returns the change in x/y that is needed to reach "to" from "from"
 /// within a prompt. If "to" is before or after the prompt bounds then
 /// the result will be bounded to the prompt.
@@ -2871,10 +2876,7 @@ pub fn promptPath(
     self: *Screen,
     from: Pin,
     to: Pin,
-) struct {
-    x: isize,
-    y: isize,
-} {
+) CursorPath {
     // Get our prompt bounds assuming "from" is at a prompt.
     const bounds = self.selectPrompt(from) orelse return .{ .x = 0, .y = 0 };
 
@@ -2904,10 +2906,7 @@ pub fn inputPath(
     self: *Screen,
     from: Pin,
     to: Pin,
-) struct {
-    x: isize,
-    y: isize,
-} {
+) CursorPath {
     const bounds = self.inputBounds(from) orelse return .{ .x = 0, .y = 0 };
 
     const to_clamped = if (bounds.contains(self, to))
