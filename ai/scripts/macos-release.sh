@@ -31,6 +31,7 @@ require_env() {
 require_cmd awk
 require_cmd codesign
 require_cmd ditto
+require_cmd file
 require_cmd gh
 require_cmd git
 require_cmd xcrun
@@ -92,6 +93,12 @@ FRAMEWORK_DIR="${APP_PATH}/Contents/Frameworks"
 while IFS= read -r -d '' dylib; do
   sign_item "$dylib"
 done < <(find "$APP_PATH/Contents" -type f \( -name "*.dylib" -o -name "*.so" \) -print0 || true)
+
+while IFS= read -r -d '' exe; do
+  if file -b "$exe" | grep -q "Mach-O"; then
+    sign_item "$exe"
+  fi
+done < <(find "$APP_PATH/Contents" -type f -perm -111 -print0 || true)
 
 while IFS= read -r -d '' helper; do
   sign_item "$helper"
