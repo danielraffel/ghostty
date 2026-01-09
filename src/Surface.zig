@@ -4328,6 +4328,35 @@ pub fn mouseButtonCallback(
     return false;
 }
 
+const Arrow = enum { up, down, left, right };
+
+fn arrowSequence(t: *terminal.Terminal, arrow: Arrow) []const u8 {
+    return switch (arrow) {
+        .up => if (t.modes.get(.cursor_keys)) "\x1bOA" else "\x1b[A",
+        .down => if (t.modes.get(.cursor_keys)) "\x1bOB" else "\x1b[B",
+        .right => if (t.modes.get(.cursor_keys)) "\x1bOC" else "\x1b[C",
+        .left => if (t.modes.get(.cursor_keys)) "\x1bOD" else "\x1b[D",
+    };
+}
+
+fn sendArrowSequences(self: *Surface, path: terminal.Screen.CursorPath) void {
+    const t = &self.io.terminal;
+
+    if (path.y != 0) {
+        const arrow = arrowSequence(t, if (path.y < 0) .up else .down);
+        for (0..@abs(path.y)) |_| {
+            self.queueIo(.{ .write_stable = arrow }, .locked);
+        }
+    }
+
+    if (path.x != 0) {
+        const arrow = arrowSequence(t, if (path.x < 0) .left else .right);
+        for (0..@abs(path.x)) |_| {
+            self.queueIo(.{ .write_stable = arrow }, .locked);
+        }
+    }
+}
+
 /// Performs the "click-to-move" logic to move the cursor to the given
 /// screen point if possible. This works by converting the path to the
 /// given point into a series of arrow key inputs.
