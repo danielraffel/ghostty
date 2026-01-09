@@ -37,6 +37,9 @@ require_cmd git
 require_cmd xcrun
 require_cmd zig
 
+CREATE_DMG="${CREATE_DMG:-1}"
+BUILD_PKG="${BUILD_PKG:-1}"
+
 require_env APPLE_ID
 require_env TEAM_ID
 require_env APP_CERT
@@ -74,8 +77,16 @@ APP_PATH="${ROOT}/zig-out/Ghostty.app"
 ENTITLEMENTS="${ROOT}/macos/GhosttyReleaseLocal.entitlements"
 SUBMIT_ZIP="${ARTIFACT_DIR}/Ghostty-${VERSION}-macos-universal.notarize.zip"
 FINAL_ZIP="${ARTIFACT_DIR}/Ghostty-${VERSION}-macos-universal.zip"
+DMG_PATH="${ARTIFACT_DIR}/Ghostty-${VERSION}-macos-universal.dmg"
 
 mkdir -p "$ARTIFACT_DIR"
+
+if [[ "$CREATE_DMG" -eq 1 ]]; then
+  if ! command -v create-dmg >/dev/null 2>&1; then
+    echo "Missing required command: create-dmg (install via: npm install --global create-dmg) or set CREATE_DMG=0" >&2
+    exit 1
+  fi
+fi
 
 zig build -Doptimize=ReleaseFast
 
@@ -130,8 +141,23 @@ xcrun stapler staple "$APP_PATH"
 
 ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" "$FINAL_ZIP"
 
+if [[ "$CREATE_DMG" -eq 1 ]]; then
+  rm -f "$DMG_PATH" "$ARTIFACT_DIR"/Ghostty*.dmg
+  create-dmg --identity="$APP_CERT" "$APP_PATH" "$ARTIFACT_DIR"
+  dmg_source="$(ls -1t "$ARTIFACT_DIR"/Ghostty*.dmg | head -n 1)"
+  mv "$dmg_source" "$DMG_PATH"
+
+  xcrun notarytool submit "$DMG_PATH" \
+    --apple-id "$APPLE_ID" \
+    --team-id "$TEAM_ID" \
+    --password "$APP_SPECIFIC_PASSWORD" \
+    --wait
+
+  xcrun stapler staple "$DMG_PATH"
+fi
+
 PKG_PATH=""
-if [[ -n "${INSTALLER_CERT:-}" ]]; then
+if [[ -n "${INSTALLER_CERT:-}" && "$BUILD_PKG" -eq 1 ]]; then
   require_cmd productbuild
   PKG_PATH="${ARTIFACT_DIR}/Ghostty-${VERSION}.pkg"
   rm -f "$PKG_PATH"
@@ -146,23 +172,31 @@ if [[ -n "${INSTALLER_CERT:-}" ]]; then
   xcrun stapler staple "$PKG_PATH"
 fi
 
-if gh release view "$TAG" --repo "$GITHUB_USER/$GITHUB_REPO" >/dev/null 2>&1; then
-  gh release upload "$TAG" "$FINAL_ZIP" --repo "$GITHUB_USER/$GITHUB_REPO" --clobber
-  if [[ -n "$PKG_PATH" ]]; then
-    gh release upload "$TAG" "$PKG_PATH" --repo "$GITHUB_USER/$GITHUB_REPO" --clobber
-  fi
-else
-  if [[ -n "$PKG_PATH" ]]; then
-    gh release create "$TAG" "$FINAL_ZIP" "$PKG_PATH" \
-      --repo "$GITHUB_USER/$GITHUB_REPO" \
-      --title "$TAG" \
-      --generate-notes
-  else
-    gh release create "$TAG" "$FINAL_ZIP" \
-      --repo "$GITHUB_USER/$GITHUB_REPO" \
-      --title "$TAG" \
-      --generate-notes
-  fi
+release_assets=("$FINAL_ZIP")
+if [[ -f "$DMG_PATH" ]]; then
+  release_assets+=("$DMG_PATH")
+fi
+if [[ -n "$PKG_PATH" ]]; then
+  release_assets+=("$PKG_PATH")
 fi
 
-echo "Release asset ready: $FINAL_ZIP"
+if gh release view "$TAG" --repo "$GITHUB_USER/$GITHUB_REPO" >/dev/null 2>&1; then
+  gh release upload "$TAG" "${release_assets[@]}" --repo "$GITHUB_USER/$GITHUB_REPO" --clobber
+else
+  gh release create "$TAG" "${release_assets[@]}" \
+    --repo "$GITHUB_USER/$GITHUB_REPO" \
+    --title "$TAG" \
+    --generate-notes
+fi
+
+echo "Release assets ready:"
+echo "  App: $APP_PATH"
+echo "  Zip: $FINAL_ZIP"
+if [[ -f "$DMG_PATH" ]]; then
+  echo "  DMG: $DMG_PATH"
+fi
+if [[ -n "$PKG_PATH" ]]; then
+  echo "  PKG: $PKG_PATH"
+fi
+echo "Open app:"
+echo "  open \"$APP_PATH\""
