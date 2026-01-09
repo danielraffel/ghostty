@@ -4076,12 +4076,13 @@ pub fn mouseButtonCallback(
 
         if (plain_click_move and self.mouse.left_click_count != 1) break :click_move;
 
-        // Moving always resets the click count so that we don't highlight.
-        self.mouse.left_click_count = 0;
         const pin = self.mouse.left_click_pin orelse break :click_move;
         if (alt_click_move) {
+            // Moving always resets the click count so that we don't highlight.
+            self.mouse.left_click_count = 0;
             try self.clickMoveCursor(pin.*);
         } else {
+            // Preserve the click count so a second click can select a word.
             try self.clickMoveCursorInput(pin.*);
         }
         return true;
