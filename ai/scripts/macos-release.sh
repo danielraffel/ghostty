@@ -88,19 +88,20 @@ sign_item() {
 }
 
 FRAMEWORK_DIR="${APP_PATH}/Contents/Frameworks"
-if [[ -d "$FRAMEWORK_DIR" ]]; then
-  while IFS= read -r -d '' framework; do
-    sign_item "$framework"
-  done < <(find "$FRAMEWORK_DIR" -type d -name "*.framework" -print0)
 
-  while IFS= read -r -d '' dylib; do
-    sign_item "$dylib"
-  done < <(find "$FRAMEWORK_DIR" -type f -name "*.dylib" -print0)
-fi
+while IFS= read -r -d '' dylib; do
+  sign_item "$dylib"
+done < <(find "$APP_PATH/Contents" -type f \( -name "*.dylib" -o -name "*.so" \) -print0 || true)
 
 while IFS= read -r -d '' helper; do
   sign_item "$helper"
 done < <(find "$APP_PATH/Contents" -type d \( -name "*.app" -o -name "*.xpc" \) -print0 || true)
+
+if [[ -d "$FRAMEWORK_DIR" ]]; then
+  while IFS= read -r -d '' framework; do
+    sign_item "$framework"
+  done < <(find "$FRAMEWORK_DIR" -type d -name "*.framework" -print0)
+fi
 
 /usr/bin/codesign --force --options runtime --timestamp \
   --entitlements "$ENTITLEMENTS" \
