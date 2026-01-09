@@ -305,6 +305,7 @@ const DerivedConfig = struct {
     right_click_action: configpkg.RightClickAction,
     confirm_close_surface: configpkg.ConfirmCloseSurface,
     cursor_click_to_move: bool,
+    cursor_click_to_move_input: bool,
     desktop_notifications: bool,
     font: font.SharedGridSet.DerivedConfig,
     mouse_interval: u64,
@@ -381,6 +382,7 @@ const DerivedConfig = struct {
             .right_click_action = config.@"right-click-action",
             .confirm_close_surface = config.@"confirm-close-surface",
             .cursor_click_to_move = config.@"cursor-click-to-move",
+            .cursor_click_to_move_input = config.@"cursor-click-to-move-input",
             .desktop_notifications = config.@"desktop-notifications",
             .font = try font.SharedGridSet.DerivedConfig.init(alloc, config),
             .mouse_interval = config.@"click-repeat-interval" * 1_000_000, // 500ms
@@ -4056,10 +4058,14 @@ pub fn mouseButtonCallback(
         }
     }
 
+    const alt_click_move = mods.alt and self.config.cursor_click_to_move;
+    const plain_click_move = self.config.cursor_click_to_move_input and
+        mods.withoutLocks().empty();
+
     // For left button click release we check if we are moving our cursor.
     if (button == .left and
         action == .release and
-        mods.alt)
+        (alt_click_move or plain_click_move))
     click_move: {
         self.renderer_state.mutex.lock();
         defer self.renderer_state.mutex.unlock();
@@ -4068,10 +4074,16 @@ pub fn mouseButtonCallback(
         // it means that we moved our cursor while pressing the mouse button.
         if (self.io.terminal.screens.active.selection != null) break :click_move;
 
+        if (plain_click_move and self.mouse.left_click_count != 1) break :click_move;
+
         // Moving always resets the click count so that we don't highlight.
         self.mouse.left_click_count = 0;
         const pin = self.mouse.left_click_pin orelse break :click_move;
-        try self.clickMoveCursor(pin.*);
+        if (alt_click_move) {
+            try self.clickMoveCursor(pin.*);
+        } else {
+            try self.clickMoveCursorInput(pin.*);
+        }
         return true;
     }
 
@@ -4367,6 +4379,25 @@ fn clickMoveCursor(self: *Surface, to: terminal.Pin) !void {
             self.queueIo(.{ .write_stable = arrow }, .locked);
         }
     }
+}
+
+/// Moves the cursor within the input area of the active prompt.
+fn clickMoveCursorInput(self: *Surface, to: terminal.Pin) !void {
+    if (!self.config.cursor_click_to_move_input) return;
+
+    const t = &self.io.terminal;
+    if (t.screens.active_key != .primary) return;
+    if (!t.flags.shell_redraws_prompt) return;
+    if (!t.cursorIsAtPrompt()) return;
+
+    const screen = t.screens.active;
+    const from = screen.cursor.page_pin.*;
+    const bounds = screen.inputBounds(from) orelse return;
+    if (!bounds.contains(screen, to)) return;
+
+    const path = screen.inputPath(from, to);
+    if (path.x == 0 and path.y == 0) return;
+    self.sendArrowSequences(path);
 }
 
 const Link = struct {
