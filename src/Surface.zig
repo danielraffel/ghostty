@@ -149,6 +149,9 @@ focused: bool = true,
 /// Used to determine whether to continuously scroll.
 selection_scroll_active: bool = false,
 
+/// True when the current selection is eligible for in-place replacement.
+edit_selection_active: bool = false,
+
 /// True if the surface is in read-only mode. When read-only, no input
 /// is sent to the PTY but terminal-level operations like selections,
 /// (native) scrolling, and copy keybinds still work. Warn before quit is
@@ -302,6 +305,7 @@ const DerivedConfig = struct {
     clipboard_paste_bracketed_safe: bool,
     clipboard_codepoint_map: configpkg.Config.RepeatableClipboardCodepointMap,
     copy_on_select: configpkg.CopyOnSelect,
+    inplace_command_editing: bool,
     right_click_action: configpkg.RightClickAction,
     confirm_close_surface: configpkg.ConfirmCloseSurface,
     cursor_click_to_move: bool,
@@ -379,6 +383,7 @@ const DerivedConfig = struct {
             .clipboard_paste_bracketed_safe = config.@"clipboard-paste-bracketed-safe",
             .clipboard_codepoint_map = try config.@"clipboard-codepoint-map".clone(alloc),
             .copy_on_select = config.@"copy-on-select",
+            .inplace_command_editing = config.@"inplace-command-editing",
             .right_click_action = config.@"right-click-action",
             .confirm_close_surface = config.@"confirm-close-surface",
             .cursor_click_to_move = config.@"cursor-click-to-move",
@@ -2331,6 +2336,9 @@ fn copySelectionToClipboards(
 fn setSelection(self: *Surface, sel_: ?terminal.Selection) !void {
     const prev_ = self.io.terminal.screens.active.selection;
     try self.io.terminal.screens.active.select(sel_);
+    self.classifySelection();
+
+    if (self.edit_selection_active) return;
 
     // If copy on select is false then exit early.
     if (self.config.copy_on_select == .false) return;
@@ -2365,6 +2373,43 @@ fn setSelection(self: *Surface, sel_: ?terminal.Selection) !void {
             );
         },
     }
+}
+
+fn selectionEligibleForEdit(
+    t: *terminal.Terminal,
+    sel: terminal.Selection,
+    enabled: bool,
+    readonly: bool,
+    preedit_active: bool,
+) bool {
+    if (!enabled or readonly or preedit_active) return false;
+    if (!t.flags.semantic_prompt_seen or t.flags.password_input) return false;
+    if (t.flags.mouse_event != .none) return false;
+    if (!t.cursorIsAtPrompt()) return false;
+    if (sel.rectangle) return false;
+
+    const screen = t.screens.active;
+    const sel_start = sel.topLeft(screen);
+    const sel_end = sel.bottomRight(screen);
+    const bounds = screen.inputBounds(sel_start) orelse return false;
+    return bounds.contains(screen, sel_start) and bounds.contains(screen, sel_end);
+}
+
+/// Updates edit_selection_active based on the current selection.
+/// Caller must hold the renderer mutex.
+fn classifySelection(self: *Surface) void {
+    const sel = self.renderer_state.terminal.screens.active.selection orelse {
+        self.edit_selection_active = false;
+        return;
+    };
+
+    self.edit_selection_active = selectionEligibleForEdit(
+        self.renderer_state.terminal,
+        sel,
+        self.config.inplace_command_editing,
+        self.readonly,
+        self.renderer_state.preedit != null,
+    );
 }
 
 /// Change the cell size for the terminal grid. This can happen as
@@ -2515,7 +2560,10 @@ pub fn preeditCallback(self: *Surface, preedit_: ?[]const u8) !void {
     if (self.renderer_state.preedit != null or
         preedit_ != null)
     {
-        if (self.config.selection_clear_on_typing) {
+        if (preedit_ != null and self.edit_selection_active) {
+            self.edit_selection_active = false;
+            self.setSelection(null) catch {};
+        } else if (self.config.selection_clear_on_typing) {
             self.setSelection(null) catch {};
         }
     }
@@ -4173,6 +4221,7 @@ pub fn mouseButtonCallback(
                 // If we have a selection, clear it. This always happens.
                 if (self.io.terminal.screens.active.selection != null) {
                     try self.io.terminal.screens.active.select(null);
+                    self.edit_selection_active = false;
                     try self.queueRender();
                 }
             },
@@ -4197,6 +4246,7 @@ pub fn mouseButtonCallback(
                 };
                 if (sel_) |sel| {
                     try self.io.terminal.screens.active.select(sel);
+                    self.classifySelection();
                     try self.queueRender();
                 }
             },
@@ -4209,6 +4259,7 @@ pub fn mouseButtonCallback(
                     self.io.terminal.screens.active.selectLine(.{ .pin = pin.* });
                 if (sel_) |sel| {
                     try self.io.terminal.screens.active.select(sel);
+                    self.classifySelection();
                     try self.queueRender();
                 }
             },
@@ -4896,6 +4947,7 @@ fn dragLeftClickDouble(
             false,
         ));
     }
+    self.classifySelection();
 }
 
 /// Triple-click dragging moves the selection one "line" at a time.
@@ -4923,6 +4975,7 @@ fn dragLeftClickTriple(
         sel.endPtr().* = line.end();
     }
     try self.io.terminal.screens.active.select(sel);
+    self.classifySelection();
 }
 
 fn dragLeftClickSingle(
@@ -4939,6 +4992,7 @@ fn dragLeftClickSingle(
         self.mouse.mods,
         self.size,
     ));
+    self.classifySelection();
 }
 
 /// Calculates the appropriate selection given pins and pixel x positions for
@@ -6827,6 +6881,61 @@ test "Surface: rectangle selection logic" {
         9, 2, // expected end
         true, //rectangle selection
     );
+}
+
+test "Surface: selectionEligibleForEdit gating" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var t = try terminal.Terminal.init(alloc, .{ .cols = 10, .rows = 2 });
+    defer t.deinit(alloc);
+
+    t.flags.semantic_prompt_seen = true;
+    t.setCursorPos(1, 4);
+
+    const row = t.screens.active.pages.pin(.{ .active = .{ .x = 0, .y = 0 } }).?.rowAndCell().row;
+    row.semantic_prompt = .input;
+    row.setInputStartCol(2);
+
+    const sel_ok = terminal.Selection.init(
+        t.screens.active.pages.pin(.{ .active = .{ .x = 2, .y = 0 } }).?,
+        t.screens.active.pages.pin(.{ .active = .{ .x = 4, .y = 0 } }).?,
+        false,
+    );
+    try testing.expect(selectionEligibleForEdit(&t, sel_ok, true, false, false));
+
+    const sel_bad = terminal.Selection.init(
+        t.screens.active.pages.pin(.{ .active = .{ .x = 1, .y = 0 } }).?,
+        t.screens.active.pages.pin(.{ .active = .{ .x = 4, .y = 0 } }).?,
+        false,
+    );
+    try testing.expect(!selectionEligibleForEdit(&t, sel_bad, true, false, false));
+
+    const sel_rect = terminal.Selection.init(
+        t.screens.active.pages.pin(.{ .active = .{ .x = 2, .y = 0 } }).?,
+        t.screens.active.pages.pin(.{ .active = .{ .x = 4, .y = 0 } }).?,
+        true,
+    );
+    try testing.expect(!selectionEligibleForEdit(&t, sel_rect, true, false, false));
+
+    try testing.expect(!selectionEligibleForEdit(&t, sel_ok, false, false, false));
+    try testing.expect(!selectionEligibleForEdit(&t, sel_ok, true, true, false));
+    try testing.expect(!selectionEligibleForEdit(&t, sel_ok, true, false, true));
+
+    t.flags.semantic_prompt_seen = false;
+    try testing.expect(!selectionEligibleForEdit(&t, sel_ok, true, false, false));
+    t.flags.semantic_prompt_seen = true;
+
+    t.flags.password_input = true;
+    try testing.expect(!selectionEligibleForEdit(&t, sel_ok, true, false, false));
+    t.flags.password_input = false;
+
+    t.flags.mouse_event = .normal;
+    try testing.expect(!selectionEligibleForEdit(&t, sel_ok, true, false, false));
+    t.flags.mouse_event = .none;
+
+    row.semantic_prompt = .command;
+    try testing.expect(!selectionEligibleForEdit(&t, sel_ok, true, false, false));
 }
 
 test "Surface: arrowSequence respects cursor_keys" {
