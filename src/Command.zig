@@ -693,6 +693,7 @@ test "Command: posix fork handles execveZ failure" {
         .path = "/not/a/binary",
         .args = &.{ "/not/a/binary", "" },
         .stdout = stdout,
+        .stderr = stdout,
         .cwd = "/bin",
     };
 
