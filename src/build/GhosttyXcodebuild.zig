@@ -50,6 +50,7 @@ pub fn init(
 
     const env = try std.process.getEnvMap(b.allocator);
     const app_path = b.fmt("macos/build/{s}/Ghostty.app", .{xc_config});
+    const derived_data_path = b.path(".zig-cache/xcodebuild");
 
     // Our step to build the Ghostty macOS app.
     const build = build: {
@@ -70,6 +71,8 @@ pub fn init(
             "-configuration",
             xc_config,
         });
+        step.addArgs(&.{ "-derivedDataPath" });
+        step.addFileArg(derived_data_path);
 
         // If we have a specific architecture, we need to pass it
         // to xcodebuild.
@@ -105,6 +108,8 @@ pub fn init(
             "-scheme",
             "Ghostty",
         });
+        step.addArgs(&.{ "-derivedDataPath" });
+        step.addFileArg(derived_data_path);
         if (xc_arch) |arch| step.addArgs(&.{ "-arch", arch });
 
         // We need the xcframework
