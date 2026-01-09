@@ -11,6 +11,8 @@ if [[ -f "$ENV_FILE" ]]; then
   set +a
 fi
 
+cd "$ROOT"
+
 require_cmd() {
   command -v "$1" >/dev/null 2>&1 || {
     echo "Missing required command: $1" >&2
@@ -30,6 +32,7 @@ require_cmd awk
 require_cmd codesign
 require_cmd ditto
 require_cmd gh
+require_cmd git
 require_cmd xcrun
 require_cmd zig
 
@@ -40,6 +43,23 @@ require_env APP_SPECIFIC_PASSWORD
 require_env GITHUB_USER
 
 GITHUB_REPO="${GITHUB_REPO:-ghostty}"
+
+if [[ -n "$(git status --porcelain)" ]]; then
+  echo "Working tree is dirty. Commit or stash before releasing." >&2
+  exit 1
+fi
+
+if git rev-parse --abbrev-ref --symbolic-full-name @{u} >/dev/null 2>&1; then
+  ahead="$(git rev-list --left-right --count @{u}...HEAD | awk '{print $2}')"
+  if [[ "${ahead:-0}" -gt 0 ]]; then
+    if [[ "${PUSH_RELEASE:-0}" -eq 1 ]]; then
+      git push
+    else
+      echo "Local branch is ahead of remote. Set PUSH_RELEASE=1 to push." >&2
+      exit 1
+    fi
+  fi
+fi
 
 VERSION="$(awk -F '\"' '/^version/ {print $2; exit}' "$ROOT/build.zig.zon")"
 if [[ -z "$VERSION" ]]; then
@@ -102,13 +122,39 @@ xcrun stapler staple "$APP_PATH"
 
 ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" "$FINAL_ZIP"
 
+PKG_PATH=""
+if [[ -n "${INSTALLER_CERT:-}" ]]; then
+  require_cmd productbuild
+  PKG_PATH="${ARTIFACT_DIR}/Ghostty-${VERSION}.pkg"
+  rm -f "$PKG_PATH"
+  productbuild --component "$APP_PATH" /Applications --sign "$INSTALLER_CERT" "$PKG_PATH"
+
+  xcrun notarytool submit "$PKG_PATH" \
+    --apple-id "$APPLE_ID" \
+    --team-id "$TEAM_ID" \
+    --password "$APP_SPECIFIC_PASSWORD" \
+    --wait
+
+  xcrun stapler staple "$PKG_PATH"
+fi
+
 if gh release view "$TAG" --repo "$GITHUB_USER/$GITHUB_REPO" >/dev/null 2>&1; then
   gh release upload "$TAG" "$FINAL_ZIP" --repo "$GITHUB_USER/$GITHUB_REPO" --clobber
+  if [[ -n "$PKG_PATH" ]]; then
+    gh release upload "$TAG" "$PKG_PATH" --repo "$GITHUB_USER/$GITHUB_REPO" --clobber
+  fi
 else
-  gh release create "$TAG" "$FINAL_ZIP" \
-    --repo "$GITHUB_USER/$GITHUB_REPO" \
-    --title "$TAG" \
-    --generate-notes
+  if [[ -n "$PKG_PATH" ]]; then
+    gh release create "$TAG" "$FINAL_ZIP" "$PKG_PATH" \
+      --repo "$GITHUB_USER/$GITHUB_REPO" \
+      --title "$TAG" \
+      --generate-notes
+  else
+    gh release create "$TAG" "$FINAL_ZIP" \
+      --repo "$GITHUB_USER/$GITHUB_REPO" \
+      --title "$TAG" \
+      --generate-notes
+  fi
 fi
 
 echo "Release asset ready: $FINAL_ZIP"
