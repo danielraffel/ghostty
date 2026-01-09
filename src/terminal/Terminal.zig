@@ -84,6 +84,9 @@ flags: packed struct {
     // then we should clear the screen below and allow the shell to redraw.
     shell_redraws_prompt: bool = false,
 
+    /// True once we've observed any semantic prompt markers (OSC 133).
+    semantic_prompt_seen: bool = false,
+
     // This is set via ESC[4;2m. Any other modify key mode just sets
     // this to false and we act in mode 1 by default.
     modify_other_keys_2: bool = false,
@@ -768,6 +771,9 @@ fn printWrap(self: *Terminal) !void {
         // New line must inherit semantic prompt of the old line
         self.screens.active.cursor.page_row.semantic_prompt = old_prompt;
         self.screens.active.cursor.page_row.wrap_continuation = true;
+        if (old_prompt == .input) {
+            self.screens.active.cursor.page_row.setInputStartCol(0);
+        }
     }
 
     // Assure that our screen is consistent
@@ -815,8 +821,12 @@ pub fn carriageReturn(self: *Terminal) void {
 
 /// Linefeed moves the cursor to the next line.
 pub fn linefeed(self: *Terminal) !void {
+    const old_prompt = self.screens.active.cursor.page_row.semantic_prompt;
     try self.index();
     if (self.modes.get(.linefeed)) self.carriageReturn();
+    if (old_prompt == .input) {
+        self.screens.active.cursor.page_row.setInputStartCol(0);
+    }
 }
 
 /// Backspace moves the cursor back a column (but not less than 0).
@@ -1066,12 +1076,18 @@ pub const SemanticPrompt = enum {
 /// is located.
 pub fn markSemanticPrompt(self: *Terminal, p: SemanticPrompt) void {
     //log.debug("semantic_prompt y={} p={}", .{ self.screens.active.cursor.y, p });
-    self.screens.active.cursor.page_row.semantic_prompt = switch (p) {
+    const row = self.screens.active.cursor.page_row;
+    row.semantic_prompt = switch (p) {
         .prompt => .prompt,
         .prompt_continuation => .prompt_continuation,
         .input => .input,
         .command => .command,
     };
+
+    row.setInputStartCol(switch (p) {
+        .input => @intCast(self.screens.active.cursor.x),
+        else => null,
+    });
 }
 
 /// Returns true if the cursor is currently at a prompt. Another way to look
@@ -11049,6 +11065,43 @@ test "Terminal: cursorIsAtPrompt alternate screen" {
     try testing.expect(!t.cursorIsAtPrompt());
     t.markSemanticPrompt(.prompt);
     try testing.expect(!t.cursorIsAtPrompt());
+}
+
+test "Terminal: input_start_col set and cleared" {
+    const alloc = testing.allocator;
+    var t = try init(alloc, .{ .cols = 5, .rows = 2 });
+    defer t.deinit(alloc);
+
+    t.setCursorPos(1, 3);
+    t.markSemanticPrompt(.input);
+    try testing.expectEqual(@as(?u16, 2), t.screens.active.cursor.page_row.inputStartCol());
+
+    t.markSemanticPrompt(.prompt);
+    try testing.expectEqual(@as(?u16, null), t.screens.active.cursor.page_row.inputStartCol());
+}
+
+test "Terminal: input_start_col propagates on linefeed" {
+    const alloc = testing.allocator;
+    var t = try init(alloc, .{ .cols = 5, .rows = 3 });
+    defer t.deinit(alloc);
+
+    t.setCursorPos(1, 1);
+    t.markSemanticPrompt(.input);
+    try t.linefeed();
+    try testing.expectEqual(@as(?u16, 0), t.screens.active.cursor.page_row.inputStartCol());
+}
+
+test "Terminal: input_start_col propagates on wrap" {
+    const alloc = testing.allocator;
+    var t = try init(alloc, .{ .cols = 3, .rows = 3 });
+    defer t.deinit(alloc);
+
+    t.setCursorPos(1, 1);
+    t.markSemanticPrompt(.input);
+    try t.printString("ABCD");
+
+    const cell = t.screens.active.pages.getCell(.{ .active = .{ .x = 0, .y = 1 } }).?;
+    try testing.expectEqual(@as(?u16, 0), cell.row.inputStartCol());
 }
 
 test "Terminal: fullReset with a non-empty pen" {

@@ -154,12 +154,22 @@ pub const Handler = struct {
             .start_hyperlink => try self.terminal.screens.active.startHyperlink(value.uri, value.id),
             .end_hyperlink => self.terminal.screens.active.endHyperlink(),
             .prompt_start => {
-                self.terminal.screens.active.cursor.page_row.semantic_prompt = .prompt;
+                self.terminal.flags.semantic_prompt_seen = true;
+                self.terminal.markSemanticPrompt(.prompt);
                 self.terminal.flags.shell_redraws_prompt = value.redraw;
             },
-            .prompt_continuation => self.terminal.screens.active.cursor.page_row.semantic_prompt = .prompt_continuation,
-            .prompt_end => self.terminal.markSemanticPrompt(.input),
-            .end_of_input => self.terminal.markSemanticPrompt(.command),
+            .prompt_continuation => {
+                self.terminal.flags.semantic_prompt_seen = true;
+                self.terminal.markSemanticPrompt(.prompt_continuation);
+            },
+            .prompt_end => {
+                self.terminal.flags.semantic_prompt_seen = true;
+                self.terminal.markSemanticPrompt(.input);
+            },
+            .end_of_input => {
+                self.terminal.flags.semantic_prompt_seen = true;
+                self.terminal.markSemanticPrompt(.command);
+            },
             .end_of_command => self.terminal.screens.active.cursor.page_row.semantic_prompt = .input,
             .mouse_shape => self.terminal.mouse_shape = value,
             .color_operation => try self.colorOperation(value.op, &value.requests),
@@ -875,4 +885,22 @@ test "palette dirty flag set on color change" {
     t.flags.dirty.palette = false;
     try s.nextSlice("\x1b]21;1=rgb:00/ff/00\x1b\\");
     try testing.expect(t.flags.dirty.palette);
+}
+
+test "stream readonly: semantic_prompt_seen set on prompt markers" {
+    var t: Terminal = try .init(testing.allocator, .{ .cols = 5, .rows = 2 });
+    defer t.deinit(testing.allocator);
+
+    var handler = Handler.init(&t);
+
+    try handler.vt(.prompt_start, .{ .aid = null, .redraw = true });
+    try testing.expect(t.flags.semantic_prompt_seen);
+
+    t.flags.semantic_prompt_seen = false;
+    try handler.vt(.prompt_end, {});
+    try testing.expect(t.flags.semantic_prompt_seen);
+
+    t.flags.semantic_prompt_seen = false;
+    try handler.vt(.end_of_input, {});
+    try testing.expect(t.flags.semantic_prompt_seen);
 }

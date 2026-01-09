@@ -1594,6 +1594,8 @@ const ReflowCursor = struct {
 
     fn copyRowMetadata(self: *ReflowCursor, other: *const Row) void {
         self.page_row.semantic_prompt = other.semantic_prompt;
+        self.page_row.input_start_col = other.input_start_col;
+        self.page_row.input_start_col_set = other.input_start_col_set;
     }
 };
 
