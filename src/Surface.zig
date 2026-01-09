@@ -2395,6 +2395,106 @@ fn selectionEligibleForEdit(
     return bounds.contains(screen, sel_start) and bounds.contains(screen, sel_end);
 }
 
+const PromptSelectionResult = enum {
+    not_handled,
+    handled_no_change,
+    handled_changed,
+};
+
+fn clampInputPin(
+    screen: *terminal.Screen,
+    bounds: terminal.Selection,
+    pin: terminal.Pin,
+) terminal.Pin {
+    if (bounds.contains(screen, pin)) return pin;
+
+    const ordered = bounds.ordered(screen, .forward);
+    const start = ordered.start();
+    const end = ordered.end();
+    if (pin.before(start)) return start;
+    if (end.before(pin)) return end;
+    return pin;
+}
+
+fn stepInputPin(
+    screen: *terminal.Screen,
+    bounds: terminal.Selection,
+    from: terminal.Pin,
+    direction: input.Binding.AdjustSelection,
+) terminal.Pin {
+    const next = switch (direction) {
+        .left => from.leftWrap(1),
+        .right => from.rightWrap(1),
+        else => null,
+    } orelse return from;
+
+    return clampInputPin(screen, bounds, next);
+}
+
+/// Adjusts the selection by a single character within the prompt input area.
+/// Caller must hold the renderer mutex.
+fn adjustPromptInputSelection(
+    self: *Surface,
+    direction: input.Binding.AdjustSelection,
+) !PromptSelectionResult {
+    if (direction != .left and direction != .right) return .not_handled;
+    if (!self.config.inplace_command_editing) return .not_handled;
+    if (self.readonly or self.renderer_state.preedit != null) return .not_handled;
+
+    const t = &self.io.terminal;
+    if (t.screens.active_key != .primary) return .not_handled;
+    if (!t.flags.shell_redraws_prompt) return .not_handled;
+    if (!t.cursorIsAtPrompt()) return .not_handled;
+
+    const screen = t.screens.active;
+    const cursor = screen.cursor.page_pin.*;
+    const bounds = screen.inputBounds(cursor) orelse return .not_handled;
+
+    var sel_ptr: ?*terminal.Selection = null;
+    var sel_end = cursor;
+    if (screen.selection) |*sel| {
+        if (!selectionEligibleForEdit(
+            t,
+            sel.*,
+            self.config.inplace_command_editing,
+            self.readonly,
+            self.renderer_state.preedit != null,
+        )) {
+            return .not_handled;
+        }
+
+        sel_ptr = sel;
+        sel_end = sel.end();
+    } else {
+        const candidate = terminal.Selection.init(cursor, cursor, false);
+        if (!selectionEligibleForEdit(
+            t,
+            candidate,
+            self.config.inplace_command_editing,
+            self.readonly,
+            self.renderer_state.preedit != null,
+        )) {
+            return .not_handled;
+        }
+    }
+
+    const next = stepInputPin(screen, bounds, sel_end, direction);
+    if (next.eql(sel_end)) return .handled_no_change;
+
+    if (sel_ptr) |sel| {
+        sel.endPtr().* = next;
+    } else {
+        try self.setSelection(terminal.Selection.init(cursor, next, false));
+    }
+
+    self.sendArrowSequences(.{
+        .x = if (direction == .left) -1 else 1,
+        .y = 0,
+    });
+    screen.dirty.selection = true;
+    return .handled_changed;
+}
+
 /// Updates edit_selection_active based on the current selection.
 /// Caller must hold the renderer mutex.
 fn classifySelection(self: *Surface) void {
@@ -6055,6 +6155,15 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             self.renderer_state.mutex.lock();
             defer self.renderer_state.mutex.unlock();
 
+            switch (try self.adjustPromptInputSelection(direction)) {
+                .not_handled => {},
+                .handled_no_change => return true,
+                .handled_changed => {
+                    try self.queueRender();
+                    return true;
+                },
+            }
+
             const screen: *terminal.Screen = self.io.terminal.screens.active;
             const sel = if (screen.selection) |*sel| sel else {
                 // If we don't have a selection we do not perform this
@@ -7042,6 +7151,66 @@ test "Surface: performEditReplacement ignores edit_selection_active gate" {
     defer surface.renderer_state.mutex.unlock();
     try testing.expect(surface.performEditReplacement());
     try testing.expect(surface.io.terminal.screens.active.selection == null);
+}
+
+test "Surface: prompt input selection adjusts by character" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var mutex = std.Thread.Mutex{};
+    var mailbox = try termio.Mailbox.initSPSC(alloc);
+    defer mailbox.deinit(alloc);
+
+    var surface: Surface = undefined;
+    surface.io.terminal = try terminal.Terminal.init(alloc, .{ .cols = 6, .rows = 1 });
+    defer surface.io.terminal.deinit(alloc);
+    surface.io.mailbox = mailbox;
+    surface.renderer_state = .{
+        .mutex = &mutex,
+        .terminal = &surface.io.terminal,
+        .inspector = null,
+        .preedit = null,
+        .mouse = .{},
+    };
+    surface.io.renderer_state = &surface.renderer_state;
+    surface.readonly = false;
+    surface.edit_selection_active = false;
+    surface.config = undefined;
+    surface.config.inplace_command_editing = true;
+    surface.config.copy_on_select = .false;
+
+    surface.io.terminal.flags.semantic_prompt_seen = true;
+    surface.io.terminal.flags.shell_redraws_prompt = true;
+    surface.io.terminal.screens.active.cursorAbsolute(2, 0);
+
+    const row = surface.io.terminal.screens.active.pages.pin(.{ .active = .{ .x = 0, .y = 0 } }).?.rowAndCell().row;
+    row.semantic_prompt = .input;
+    row.setInputStartCol(2);
+
+    surface.renderer_state.mutex.lock();
+    defer surface.renderer_state.mutex.unlock();
+
+    try testing.expectEqual(
+        PromptSelectionResult.handled_changed,
+        try surface.adjustPromptInputSelection(.right),
+    );
+    const sel_right = surface.io.terminal.screens.active.selection.?;
+    try testing.expectEqual(@as(usize, 2), sel_right.start().x);
+    try testing.expectEqual(@as(usize, 3), sel_right.end().x);
+
+    try testing.expectEqual(
+        PromptSelectionResult.handled_changed,
+        try surface.adjustPromptInputSelection(.left),
+    );
+    const sel_left = surface.io.terminal.screens.active.selection.?;
+    try testing.expectEqual(@as(usize, 2), sel_left.end().x);
+
+    try testing.expectEqual(
+        PromptSelectionResult.handled_no_change,
+        try surface.adjustPromptInputSelection(.left),
+    );
+    const sel_clamped = surface.io.terminal.screens.active.selection.?;
+    try testing.expectEqual(@as(usize, 2), sel_clamped.end().x);
 }
 
 test "Surface: arrowSequence respects cursor_keys" {
