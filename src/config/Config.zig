@@ -2294,6 +2294,10 @@ keybind: Keybinds = .{},
     else => .false,
 },
 
+/// Enables GUI-style replacement of selected text at shell prompts.
+/// Requires shell integration (OSC 133) and is disabled during password input.
+@"inplace-command-editing": bool = false,
+
 /// The action to take when the user right-clicks on the terminal surface.
 ///
 /// Valid values:
