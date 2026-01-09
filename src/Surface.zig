@@ -2805,6 +2805,16 @@ pub fn keyCallback(
         break :event copy;
     };
 
+    if (event.action == .press and
+        event.utf8.len > 0 and
+        !event.composing and
+        self.edit_selection_active)
+    {
+        self.renderer_state.mutex.lock();
+        defer self.renderer_state.mutex.unlock();
+        _ = self.performEditReplacement();
+    }
+
     // Encode and send our key. If we didn't encode anything, then we
     // return the effect as ignored.
     if (try self.encodeKey(
@@ -4355,6 +4365,76 @@ pub fn mouseButtonCallback(
     }
 
     return false;
+}
+
+const Arrow = enum { up, down, left, right };
+
+fn arrowSequence(t: *terminal.Terminal, arrow: Arrow) []const u8 {
+    return switch (arrow) {
+        .up => if (t.modes.get(.cursor_keys)) "\x1bOA" else "\x1b[A",
+        .down => if (t.modes.get(.cursor_keys)) "\x1bOB" else "\x1b[B",
+        .right => if (t.modes.get(.cursor_keys)) "\x1bOC" else "\x1b[C",
+        .left => if (t.modes.get(.cursor_keys)) "\x1bOD" else "\x1b[D",
+    };
+}
+
+fn sendArrowSequences(self: *Surface, path: struct { x: isize, y: isize }) void {
+    const t = &self.io.terminal;
+
+    if (path.y != 0) {
+        const arrow = arrowSequence(t, if (path.y < 0) .up else .down);
+        for (0..@abs(path.y)) |_| {
+            self.queueIo(.{ .write_stable = arrow }, .locked);
+        }
+    }
+
+    if (path.x != 0) {
+        const arrow = arrowSequence(t, if (path.x < 0) .left else .right);
+        for (0..@abs(path.x)) |_| {
+            self.queueIo(.{ .write_stable = arrow }, .locked);
+        }
+    }
+}
+
+fn sendDeleteSequences(self: *Surface, count: usize) void {
+    if (count == 0) return;
+
+    const delete_key = "\x1b[3~";
+    for (0..count) |_| {
+        self.queueIo(.{ .write_stable = delete_key }, .locked);
+    }
+}
+
+/// Performs an in-place selection replacement. Caller must hold the renderer mutex.
+fn performEditReplacement(self: *Surface) bool {
+    if (!self.edit_selection_active) return false;
+
+    const t = &self.io.terminal;
+    const screen = t.screens.active;
+    const sel = screen.selection orelse {
+        self.edit_selection_active = false;
+        return false;
+    };
+
+    if (!selectionEligibleForEdit(
+        t,
+        sel,
+        self.config.inplace_command_editing,
+        self.readonly,
+        self.renderer_state.preedit != null,
+    )) {
+        self.edit_selection_active = false;
+        return false;
+    }
+
+    const ordered = sel.ordered(screen, .forward);
+    const path = screen.inputPath(screen.cursor.page_pin.*, ordered.start());
+    self.sendArrowSequences(path);
+    self.sendDeleteSequences(screen.countInputCharacters(sel));
+
+    screen.clearSelection();
+    self.edit_selection_active = false;
+    return true;
 }
 
 /// Performs the "click-to-move" logic to move the cursor to the given
@@ -6203,6 +6283,11 @@ fn completeClipboardPaste(
     const encode_opts: input.paste.Options = encode_opts: {
         self.renderer_state.mutex.lock();
         defer self.renderer_state.mutex.unlock();
+
+        if (self.edit_selection_active) {
+            _ = self.performEditReplacement();
+        }
+
         const opts: input.paste.Options = .fromTerminal(&self.io.terminal);
 
         // If we have paste protection enabled, we detect unsafe pastes and return
@@ -6860,4 +6945,24 @@ test "Surface: selectionEligibleForEdit gating" {
 
     row.semantic_prompt = .command;
     try testing.expect(!selectionEligibleForEdit(&t, sel_ok, true, false, false));
+}
+
+test "Surface: arrowSequence respects cursor_keys" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var t = try terminal.Terminal.init(alloc, .{ .cols = 2, .rows = 1 });
+    defer t.deinit(alloc);
+
+    t.modes.set(.cursor_keys, false);
+    try testing.expectEqualStrings("\x1b[A", arrowSequence(&t, .up));
+    try testing.expectEqualStrings("\x1b[B", arrowSequence(&t, .down));
+    try testing.expectEqualStrings("\x1b[C", arrowSequence(&t, .right));
+    try testing.expectEqualStrings("\x1b[D", arrowSequence(&t, .left));
+
+    t.modes.set(.cursor_keys, true);
+    try testing.expectEqualStrings("\x1bOA", arrowSequence(&t, .up));
+    try testing.expectEqualStrings("\x1bOB", arrowSequence(&t, .down));
+    try testing.expectEqualStrings("\x1bOC", arrowSequence(&t, .right));
+    try testing.expectEqualStrings("\x1bOD", arrowSequence(&t, .left));
 }
