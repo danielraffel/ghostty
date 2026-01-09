@@ -2,7 +2,7 @@
 
 This is a quick, local guide for building and testing Ghostty on macOS using the repo’s supported workflow. It follows `AGENTS.md` and `HACKING.md`.
 
-The helper script writes a log to `ai/output/macos-build-test-<timestamp>.log`, and Xcode test output is stored under `.zig-cache/xcodebuild` (sandbox-friendly).
+The helper script writes a log to `ai/output/macos-build-test-<timestamp>.log`, the app bundle is created at `.zig-cache/xcodebuild/Build/Products/<config>/Ghostty.app`, and Xcode output is stored under `.zig-cache/xcodebuild` (sandbox-friendly).
 
 ## Prerequisites
 

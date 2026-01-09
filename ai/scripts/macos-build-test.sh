@@ -107,9 +107,14 @@ if $run_app; then
   run_and_log zig build run
 fi
 
-app_path="$(ls -td macos/build/*/Ghostty.app 2>/dev/null | head -n 1 || true)"
+app_path="$(ls -td \
+  .zig-cache/xcodebuild/Build/Products/*/Ghostty.app \
+  macos/build/*/Ghostty.app \
+  2>/dev/null | head -n 1 || true)"
 if [[ -n "$app_path" ]]; then
+  log "app bundle: ${app_path}"
   log "open app: open \"${app_path}\""
 else
-  log "open app: (Ghostty.app not found under macos/build)"
+  log "app bundle: (Ghostty.app not found)"
+  log "open app: (Ghostty.app not found)"
 fi

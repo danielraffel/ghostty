@@ -49,8 +49,11 @@ pub fn init(
     };
 
     const env = try std.process.getEnvMap(b.allocator);
-    const app_path = b.fmt("macos/build/{s}/Ghostty.app", .{xc_config});
     const derived_data_path = b.path(".zig-cache/xcodebuild");
+    const app_path = b.fmt(
+        ".zig-cache/xcodebuild/Build/Products/{s}/Ghostty.app",
+        .{xc_config},
+    );
 
     // Our step to build the Ghostty macOS app.
     const build = build: {
@@ -66,7 +69,7 @@ pub fn init(
         step.env_map = env_map;
         step.addArgs(&.{
             "xcodebuild",
-            "-target",
+            "-scheme",
             "Ghostty",
             "-configuration",
             xc_config,
