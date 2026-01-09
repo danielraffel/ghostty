@@ -2401,6 +2401,36 @@ const PromptSelectionResult = enum {
     handled_changed,
 };
 
+fn inputMoveCount(
+    screen: *terminal.Screen,
+    from: terminal.Pin,
+    to: terminal.Pin,
+) usize {
+    if (from.eql(to)) return 0;
+
+    const ordered = if (to.before(from))
+        terminal.Selection.init(to, from, false)
+    else
+        terminal.Selection.init(from, to, false);
+    const count = screen.countInputCharacters(ordered);
+    return if (count == 0) 0 else count - 1;
+}
+
+fn sendInputCursorMove(
+    self: *Surface,
+    screen: *terminal.Screen,
+    from: terminal.Pin,
+    to: terminal.Pin,
+) void {
+    const count = inputMoveCount(screen, from, to);
+    if (count == 0) return;
+
+    const arrow = arrowSequence(&self.io.terminal, if (to.before(from)) .left else .right);
+    for (0..count) |_| {
+        self.queueIo(.{ .write_stable = arrow }, .locked);
+    }
+}
+
 fn clampInputPin(
     screen: *terminal.Screen,
     bounds: terminal.Selection,
@@ -2491,14 +2521,7 @@ fn adjustPromptInputSelection(
         self.classifySelection();
     }
 
-    const path: terminal.Screen.CursorPath = switch (direction) {
-        .left => .{ .x = -1, .y = 0 },
-        .right => .{ .x = 1, .y = 0 },
-        .up => .{ .x = 0, .y = -1 },
-        .down => .{ .x = 0, .y = 1 },
-        else => unreachable,
-    };
-    self.sendArrowSequences(path);
+    self.sendInputCursorMove(screen, sel_end, next);
     screen.dirty.selection = true;
     return .handled_changed;
 }
@@ -4557,8 +4580,7 @@ fn performEditReplacement(self: *Surface) bool {
     }
 
     const ordered = sel.ordered(screen, .forward);
-    const path = screen.inputPath(screen.cursor.page_pin.*, ordered.start());
-    self.sendArrowSequences(path);
+    self.sendInputCursorMove(screen, screen.cursor.page_pin.*, ordered.start());
     self.sendDeleteSequences(screen.countInputCharacters(sel));
 
     screen.clearSelection();
@@ -4620,10 +4642,10 @@ fn clickMoveCursor(self: *Surface, to: terminal.Pin) !void {
 }
 
 /// Moves the cursor within the input area of the active prompt.
-fn inputClickMovePath(
+fn inputClickMoveTarget(
     t: *terminal.Terminal,
     to: terminal.Pin,
-) ?terminal.Screen.CursorPath {
+) ?terminal.Pin {
     if (t.screens.active_key != .primary) return null;
     if (!t.flags.shell_redraws_prompt) return null;
     if (!t.cursorIsAtPrompt()) return null;
@@ -4632,16 +4654,17 @@ fn inputClickMovePath(
     const from = screen.cursor.page_pin.*;
     const bounds = screen.inputBounds(from) orelse return null;
     if (!bounds.contains(screen, to)) return null;
+    if (from.eql(to)) return null;
 
-    const path = screen.inputPath(from, to);
-    if (path.x == 0 and path.y == 0) return null;
-    return path;
+    return to;
 }
 
 fn clickMoveCursorInput(self: *Surface, to: terminal.Pin) !void {
     if (!self.config.cursor_click_to_move_input) return;
-    const path = inputClickMovePath(&self.io.terminal, to) orelse return;
-    self.sendArrowSequences(path);
+    const target = inputClickMoveTarget(&self.io.terminal, to) orelse return;
+    const screen = self.io.terminal.screens.active;
+    const from = screen.cursor.page_pin.*;
+    self.sendInputCursorMove(screen, from, target);
 }
 
 const Link = struct {
@@ -7273,7 +7296,7 @@ test "Surface: arrowSequence respects cursor_keys" {
     try testing.expectEqualStrings("\x1bOD", arrowSequence(&t, .left));
 }
 
-test "Surface: inputClickMovePath gating" {
+test "Surface: inputClickMoveTarget gating" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
@@ -7289,19 +7312,18 @@ test "Surface: inputClickMovePath gating" {
     t.screens.active.cursorAbsolute(4, 0);
 
     const to_inside = t.screens.active.pages.pin(.{ .active = .{ .x = 3, .y = 0 } }).?;
-    const path_opt = inputClickMovePath(&t, to_inside);
-    try testing.expect(path_opt != null);
-    const path = path_opt.?;
-    try testing.expectEqual(@as(isize, -1), path.x);
-    try testing.expectEqual(@as(isize, 0), path.y);
+    const target_opt = inputClickMoveTarget(&t, to_inside);
+    try testing.expect(target_opt != null);
+    const target = target_opt.?;
+    try testing.expect(target.eql(to_inside));
 
     const to_outside = t.screens.active.pages.pin(.{ .active = .{ .x = 1, .y = 0 } }).?;
-    try testing.expect(inputClickMovePath(&t, to_outside) == null);
+    try testing.expect(inputClickMoveTarget(&t, to_outside) == null);
 
     t.flags.shell_redraws_prompt = false;
-    try testing.expect(inputClickMovePath(&t, to_inside) == null);
+    try testing.expect(inputClickMoveTarget(&t, to_inside) == null);
 
     t.flags.shell_redraws_prompt = true;
     row.semantic_prompt = .command;
-    try testing.expect(inputClickMovePath(&t, to_inside) == null);
+    try testing.expect(inputClickMoveTarget(&t, to_inside) == null);
 }
