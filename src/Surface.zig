@@ -2425,6 +2425,8 @@ fn stepInputPin(
     const next = switch (direction) {
         .left => from.leftWrap(1),
         .right => from.rightWrap(1),
+        .up => from.up(1),
+        .down => from.down(1),
         else => null,
     } orelse return from;
 
@@ -2437,7 +2439,8 @@ fn adjustPromptInputSelection(
     self: *Surface,
     direction: input.Binding.Action.AdjustSelection,
 ) !PromptSelectionResult {
-    if (direction != .left and direction != .right) return .not_handled;
+    if (direction != .left and direction != .right and direction != .up and direction != .down)
+        return .not_handled;
     if (!self.config.inplace_command_editing) return .not_handled;
     if (self.readonly or self.renderer_state.preedit != null) return .not_handled;
 
@@ -2488,10 +2491,14 @@ fn adjustPromptInputSelection(
         self.classifySelection();
     }
 
-    self.sendArrowSequences(.{
-        .x = if (direction == .left) -1 else 1,
-        .y = 0,
-    });
+    const path: terminal.Screen.CursorPath = switch (direction) {
+        .left => .{ .x = -1, .y = 0 },
+        .right => .{ .x = 1, .y = 0 },
+        .up => .{ .x = 0, .y = -1 },
+        .down => .{ .x = 0, .y = 1 },
+        else => unreachable,
+    };
+    self.sendArrowSequences(path);
     screen.dirty.selection = true;
     return .handled_changed;
 }
@@ -7163,7 +7170,7 @@ test "Surface: prompt input selection adjusts by character" {
     defer mailbox.deinit(alloc);
 
     var surface: Surface = undefined;
-    surface.io.terminal = try terminal.Terminal.init(alloc, .{ .cols = 6, .rows = 1 });
+    surface.io.terminal = try terminal.Terminal.init(alloc, .{ .cols = 6, .rows = 2 });
     defer surface.io.terminal.deinit(alloc);
     surface.io.mailbox = mailbox;
     surface.renderer_state = .{
@@ -7184,9 +7191,13 @@ test "Surface: prompt input selection adjusts by character" {
     surface.io.terminal.flags.shell_redraws_prompt = true;
     surface.io.terminal.screens.active.cursorAbsolute(2, 0);
 
-    const row = surface.io.terminal.screens.active.pages.pin(.{ .active = .{ .x = 0, .y = 0 } }).?.rowAndCell().row;
-    row.semantic_prompt = .input;
-    row.setInputStartCol(2);
+    const row0 = surface.io.terminal.screens.active.pages.pin(.{ .active = .{ .x = 0, .y = 0 } }).?.rowAndCell().row;
+    row0.semantic_prompt = .input;
+    row0.setInputStartCol(2);
+
+    const row1 = surface.io.terminal.screens.active.pages.pin(.{ .active = .{ .x = 0, .y = 1 } }).?.rowAndCell().row;
+    row1.semantic_prompt = .input;
+    row1.setInputStartCol(0);
 
     surface.renderer_state.mutex.lock();
     defer surface.renderer_state.mutex.unlock();
@@ -7212,6 +7223,34 @@ test "Surface: prompt input selection adjusts by character" {
     );
     const sel_clamped = surface.io.terminal.screens.active.selection.?;
     try testing.expectEqual(@as(usize, 2), sel_clamped.end().x);
+
+    try testing.expectEqual(
+        PromptSelectionResult.handled_changed,
+        try surface.adjustPromptInputSelection(.down),
+    );
+    const sel_down = surface.io.terminal.screens.active.selection.?;
+    try testing.expectEqual(@as(usize, 2), sel_down.end().x);
+    try testing.expectEqual(@as(usize, 1), sel_down.end().y);
+
+    try testing.expectEqual(
+        PromptSelectionResult.handled_changed,
+        try surface.adjustPromptInputSelection(.left),
+    );
+    try testing.expectEqual(
+        PromptSelectionResult.handled_changed,
+        try surface.adjustPromptInputSelection(.left),
+    );
+    const sel_left_row1 = surface.io.terminal.screens.active.selection.?;
+    try testing.expectEqual(@as(usize, 0), sel_left_row1.end().x);
+    try testing.expectEqual(@as(usize, 1), sel_left_row1.end().y);
+
+    try testing.expectEqual(
+        PromptSelectionResult.handled_changed,
+        try surface.adjustPromptInputSelection(.up),
+    );
+    const sel_up_clamped = surface.io.terminal.screens.active.selection.?;
+    try testing.expectEqual(@as(usize, 2), sel_up_clamped.end().x);
+    try testing.expectEqual(@as(usize, 0), sel_up_clamped.end().y);
 }
 
 test "Surface: arrowSequence respects cursor_keys" {
