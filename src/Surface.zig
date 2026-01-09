@@ -4378,7 +4378,7 @@ fn arrowSequence(t: *terminal.Terminal, arrow: Arrow) []const u8 {
     };
 }
 
-fn sendArrowSequences(self: *Surface, path: struct { x: isize, y: isize }) void {
+fn sendArrowSequences(self: *Surface, path: terminal.Screen.CursorPath) void {
     const t = &self.io.terminal;
 
     if (path.y != 0) {
