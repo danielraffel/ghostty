@@ -61,7 +61,7 @@ if git rev-parse --abbrev-ref --symbolic-full-name @{u} >/dev/null 2>&1; then
   fi
 fi
 
-VERSION="$(awk -F '\"' '/^version/ {print $2; exit}' "$ROOT/build.zig.zon")"
+VERSION="$(awk -F '\"' '/^[[:space:]]*\\.version[[:space:]]*=/ {print $2; exit}' "$ROOT/build.zig.zon")"
 if [[ -z "$VERSION" ]]; then
   echo "Failed to read version from build.zig.zon" >&2
   exit 1
