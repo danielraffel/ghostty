@@ -2295,7 +2295,10 @@ keybind: Keybinds = .{},
 },
 
 /// Enables GUI-style replacement of selected text at shell prompts.
-/// Requires shell integration (OSC 133) and is disabled during password input.
+/// Requires shell integration (OSC 133). Only selections inside the input
+/// area are replaced, and the feature is disabled during password input,
+/// mouse reporting, alternate screen, or IME preedit. Replacement uses
+/// arrow/delete sequences, so shells with custom delete bindings may vary.
 @"inplace-command-editing": bool = false,
 
 /// The action to take when the user right-clicks on the terminal surface.
