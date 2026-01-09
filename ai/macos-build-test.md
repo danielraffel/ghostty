@@ -6,7 +6,7 @@ The helper script writes a log to `ai/output/macos-build-test-<timestamp>.log`, 
 
 ## Release (macOS)
 
-Use the release helper to build a ReleaseFast app, code sign, notarize, staple, create a DMG, zip, and publish to GitHub Releases via `gh`.
+Use the release helper to build ReleaseFast macOS app bundles, code sign, notarize, create DMGs, and publish to GitHub Releases via `gh`.
 
 Setup (one time):
 
@@ -26,8 +26,9 @@ PUSH_RELEASE=1 ai/scripts/macos-release.sh
 Notes:
 - The script refuses to run if tracked files have uncommitted changes.
 - It builds with `zig build -Doptimize=ReleaseFast` and uses `GhosttyReleaseLocal.entitlements`.
-- If `create-dmg` is installed, it builds/signs/notarizes a DMG (disable with `CREATE_DMG=0`).
-- If `INSTALLER_CERT` is set, it also builds/signs/notarizes a `.pkg` (disable with `BUILD_PKG=0`).
+- By default it uploads two DMGs: universal + arm64 (`BUILD_UNIVERSAL_DMG=0` or `BUILD_ARM_DMG=0` to skip).
+- Zip uploads are disabled by default; enable with `BUILD_ZIP=1` (creates both universal + arm64 zips).
+- Pkg uploads are disabled by default; enable with `BUILD_PKG=1` (requires `INSTALLER_CERT`).
 - Release assets are written to `ai/output/` and uploaded to the GitHub release for the tag in `build.zig.zon`.
 - To install `create-dmg`: `npm install --global create-dmg`.
 
