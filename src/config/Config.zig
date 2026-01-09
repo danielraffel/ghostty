@@ -819,6 +819,12 @@ palette: Palette = .{},
 /// way to implement it.
 @"cursor-click-to-move": bool = true,
 
+/// Enables moving the cursor with a plain click inside the prompt input area.
+/// This mirrors "click-to-place" behavior in editors and requires shell
+/// integration (prompt marking via `OSC 133`). Selection still works by
+/// dragging; this only applies to single clicks in the input area.
+@"cursor-click-to-move-input": bool = false,
+
 /// Hide the mouse immediately when typing. The mouse becomes visible again
 /// when the mouse is used (button, movement, etc.). Platform-specific behavior
 /// may dictate other scenarios where the mouse is shown. For example on macOS,
