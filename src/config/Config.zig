@@ -823,7 +823,7 @@ palette: Palette = .{},
 /// This mirrors "click-to-place" behavior in editors and requires shell
 /// integration (prompt marking via `OSC 133`). Selection still works by
 /// dragging; this only applies to single clicks in the input area.
-@"cursor-click-to-move-input": bool = false,
+@"cursor-click-to-move-input": bool = true,
 
 /// Hide the mouse immediately when typing. The mouse becomes visible again
 /// when the mouse is used (button, movement, etc.). Platform-specific behavior
