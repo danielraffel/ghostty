@@ -2815,6 +2815,23 @@ pub fn selectPrompt(self: *Screen, pin: Pin) ?Selection {
     return .init(start, end, false);
 }
 
+/// Returns selection bounds covering only the input area of the prompt.
+/// Returns null if the prompt has no input boundary information.
+pub fn inputBounds(self: *Screen, pin: Pin) ?Selection {
+    const prompt_sel = self.selectPrompt(pin) orelse return null;
+
+    var it = prompt_sel.start().rowIterator(.right_down, prompt_sel.end());
+    while (it.next()) |row_pin| {
+        const row = row_pin.rowAndCell().row;
+        const input_start = row.inputStartCol() orelse continue;
+        var start = row_pin;
+        start.x = input_start;
+        return .init(start, prompt_sel.end(), false);
+    }
+
+    return null;
+}
+
 pub const LineIterator = struct {
     screen: *const Screen,
     current: ?Pin = null,
@@ -2879,6 +2896,61 @@ pub fn promptPath(
     const to_x: isize = @intCast(to_pt.x);
     const to_y: isize = @intCast(to_pt.y);
     return .{ .x = to_x - from_x, .y = to_y - from_y };
+}
+
+/// Returns the change in x/y that is needed to reach "to" from "from"
+/// within the input area of a prompt.
+pub fn inputPath(
+    self: *Screen,
+    from: Pin,
+    to: Pin,
+) struct {
+    x: isize,
+    y: isize,
+} {
+    const bounds = self.inputBounds(from) orelse return .{ .x = 0, .y = 0 };
+
+    const to_clamped = if (bounds.contains(self, to))
+        to
+    else if (to.before(bounds.start()))
+        bounds.start()
+    else
+        bounds.end();
+
+    const from_pt = self.pages.pointFromPin(.screen, from).?.screen;
+    const to_pt = self.pages.pointFromPin(.screen, to_clamped).?.screen;
+    const from_x: isize = @intCast(from_pt.x);
+    const from_y: isize = @intCast(from_pt.y);
+    const to_x: isize = @intCast(to_pt.x);
+    const to_y: isize = @intCast(to_pt.y);
+    return .{ .x = to_x - from_x, .y = to_y - from_y };
+}
+
+/// Counts logical characters in a selection, skipping wide char spacer tails.
+pub fn countInputCharacters(self: *Screen, sel: Selection) usize {
+    var count: usize = 0;
+    const ordered = sel.ordered(self, .forward);
+    const start = ordered.start();
+    const end = ordered.end();
+    var row_it = start.rowIterator(.right_down, end);
+    while (row_it.next()) |row_pin| {
+        const row = row_pin.rowAndCell().row;
+        const cells = row_pin.node.data.getCells(row);
+        const row_start: usize = if (row_pin.node == start.node and row_pin.y == start.y)
+            @intCast(start.x)
+        else
+            0;
+        const row_end: usize = if (row_pin.node == end.node and row_pin.y == end.y)
+            @intCast(end.x)
+        else
+            @intCast(self.pages.cols - 1);
+        for (row_start..row_end + 1) |x| {
+            const cell = cells[x];
+            if (cell.wide == .spacer_tail) continue;
+            count += 1;
+        }
+    }
+    return count;
 }
 
 /// Dump the screen to a string. The writer given should be buffered;
@@ -8244,6 +8316,118 @@ test "Screen: promptPath" {
         try testing.expectEqual(@as(isize, 3), path.x);
         try testing.expectEqual(@as(isize, 1), path.y);
     }
+}
+
+test "Screen: inputBounds single line" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(alloc, .{ .cols = 10, .rows = 5, .max_scrollback = 0 });
+    defer s.deinit();
+
+    try s.testWriteSemanticString("$ ", .prompt);
+    try s.testWriteSemanticString("input\n", .input);
+
+    s.pages.pin(.{ .active = .{ .x = 0, .y = 0 } }).?.rowAndCell().row.setInputStartCol(2);
+
+    const sel = s.inputBounds(s.pages.pin(.{ .active = .{ .x = 3, .y = 0 } }).?).?;
+    try testing.expectEqual(point.Point{ .screen = .{
+        .x = 2,
+        .y = 0,
+    } }, s.pages.pointFromPin(.screen, sel.start()).?);
+    try testing.expectEqual(point.Point{ .screen = .{
+        .x = 9,
+        .y = 0,
+    } }, s.pages.pointFromPin(.screen, sel.end()).?);
+}
+
+test "Screen: inputBounds multiline prompt" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(alloc, .{ .cols = 10, .rows = 6, .max_scrollback = 0 });
+    defer s.deinit();
+
+    try s.testWriteSemanticString("prompt1\n", .prompt);
+    try s.testWriteSemanticString("cont\n", .prompt_continuation);
+    try s.testWriteSemanticString("input1\n", .input);
+    try s.testWriteSemanticString("input2\n", .input);
+
+    s.pages.pin(.{ .active = .{ .x = 0, .y = 2 } }).?.rowAndCell().row.setInputStartCol(4);
+    s.pages.pin(.{ .active = .{ .x = 0, .y = 3 } }).?.rowAndCell().row.setInputStartCol(0);
+
+    const sel = s.inputBounds(s.pages.pin(.{ .active = .{ .x = 5, .y = 2 } }).?).?;
+    try testing.expectEqual(point.Point{ .screen = .{
+        .x = 4,
+        .y = 2,
+    } }, s.pages.pointFromPin(.screen, sel.start()).?);
+    try testing.expectEqual(point.Point{ .screen = .{
+        .x = 9,
+        .y = 3,
+    } }, s.pages.pointFromPin(.screen, sel.end()).?);
+}
+
+test "Screen: inputBounds outside prompt returns null" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(alloc, .{ .cols = 10, .rows = 5, .max_scrollback = 0 });
+    defer s.deinit();
+
+    try s.testWriteSemanticString("$ ", .prompt);
+    try s.testWriteSemanticString("input\n", .input);
+    try s.testWriteSemanticString("output\n", .command);
+
+    s.pages.pin(.{ .active = .{ .x = 0, .y = 0 } }).?.rowAndCell().row.setInputStartCol(2);
+
+    const pin = s.pages.pin(.{ .active = .{ .x = 0, .y = 2 } }).?;
+    try testing.expect(s.inputBounds(pin) == null);
+}
+
+test "Screen: inputPath" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(alloc, .{ .cols = 10, .rows = 4, .max_scrollback = 0 });
+    defer s.deinit();
+
+    try s.testWriteSemanticString("$ ", .prompt);
+    try s.testWriteSemanticString("input\n", .input);
+
+    s.pages.pin(.{ .active = .{ .x = 0, .y = 0 } }).?.rowAndCell().row.setInputStartCol(2);
+
+    const from = s.pages.pin(.{ .active = .{ .x = 6, .y = 0 } }).?;
+    const to = s.pages.pin(.{ .active = .{ .x = 3, .y = 0 } }).?;
+    const path = s.inputPath(from, to);
+    try testing.expectEqual(@as(isize, -3), path.x);
+    try testing.expectEqual(@as(isize, 0), path.y);
+
+    const to_before = s.pages.pin(.{ .active = .{ .x = 0, .y = 0 } }).?;
+    const path_before = s.inputPath(from, to_before);
+    try testing.expectEqual(@as(isize, -4), path_before.x);
+    try testing.expectEqual(@as(isize, 0), path_before.y);
+}
+
+test "Screen: countInputCharacters wide chars" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(alloc, .{ .cols = 5, .rows = 2, .max_scrollback = 0 });
+    defer s.deinit();
+
+    try s.testWriteString("😀");
+
+    const head = s.pages.getCell(.{ .screen = .{ .x = 0, .y = 0 } }).?.cell;
+    const tail = s.pages.getCell(.{ .screen = .{ .x = 1, .y = 0 } }).?.cell;
+    try testing.expectEqual(Cell.Wide.wide, head.wide);
+    try testing.expectEqual(Cell.Wide.spacer_tail, tail.wide);
+
+    const sel_wide = Selection.init(
+        s.pages.pin(.{ .screen = .{ .x = 0, .y = 0 } }).?,
+        s.pages.pin(.{ .screen = .{ .x = 1, .y = 0 } }).?,
+        false,
+    );
+    try testing.expectEqual(@as(usize, 1), s.countInputCharacters(sel_wide));
 }
 
 test "Screen: selectionString basic" {
