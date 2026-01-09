@@ -2819,7 +2819,7 @@ pub fn keyCallback(
     if (event.action == .press and
         event.utf8.len > 0 and
         !event.composing and
-        self.edit_selection_active)
+        self.config.inplace_command_editing)
     {
         self.renderer_state.mutex.lock();
         defer self.renderer_state.mutex.unlock();
@@ -4429,8 +4429,6 @@ fn sendDeleteSequences(self: *Surface, count: usize) void {
 
 /// Performs an in-place selection replacement. Caller must hold the renderer mutex.
 fn performEditReplacement(self: *Surface) bool {
-    if (!self.edit_selection_active) return false;
-
     const t = &self.io.terminal;
     const screen = t.screens.active;
     const sel = screen.selection orelse {
@@ -4438,14 +4436,15 @@ fn performEditReplacement(self: *Surface) bool {
         return false;
     };
 
-    if (!selectionEligibleForEdit(
+    const eligible = selectionEligibleForEdit(
         t,
         sel,
         self.config.inplace_command_editing,
         self.readonly,
         self.renderer_state.preedit != null,
-    )) {
-        self.edit_selection_active = false;
+    );
+    self.edit_selection_active = eligible;
+    if (!eligible) {
         return false;
     }
 
@@ -6330,7 +6329,7 @@ fn completeClipboardPaste(
         self.renderer_state.mutex.lock();
         defer self.renderer_state.mutex.unlock();
 
-        if (self.edit_selection_active) {
+        if (self.config.inplace_command_editing) {
             _ = self.performEditReplacement();
         }
 
