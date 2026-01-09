@@ -1067,20 +1067,24 @@ pub const StreamHandler = struct {
 
     inline fn promptStart(self: *StreamHandler, aid: ?[]const u8, redraw: bool) void {
         _ = aid;
+        self.terminal.flags.semantic_prompt_seen = true;
         self.terminal.markSemanticPrompt(.prompt);
         self.terminal.flags.shell_redraws_prompt = redraw;
     }
 
     inline fn promptContinuation(self: *StreamHandler, aid: ?[]const u8) void {
         _ = aid;
+        self.terminal.flags.semantic_prompt_seen = true;
         self.terminal.markSemanticPrompt(.prompt_continuation);
     }
 
     pub inline fn promptEnd(self: *StreamHandler) !void {
+        self.terminal.flags.semantic_prompt_seen = true;
         self.terminal.markSemanticPrompt(.input);
     }
 
     pub inline fn endOfInput(self: *StreamHandler) !void {
+        self.terminal.flags.semantic_prompt_seen = true;
         self.terminal.markSemanticPrompt(.command);
         self.surfaceMessageWriter(.start_command);
     }

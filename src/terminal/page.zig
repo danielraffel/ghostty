@@ -1752,6 +1752,11 @@ pub const Row = packed struct(u64) {
     /// running program, or "unknown" if it was never set.
     semantic_prompt: SemanticPrompt = .unknown,
 
+    /// Column where user input begins on this row. Use input_start_col_set
+    /// to determine whether this value is valid.
+    input_start_col: u16 = 0,
+    input_start_col_set: bool = false,
+
     /// True if this row contains a virtual placeholder for the Kitty
     /// graphics protocol. (U+10EEEE)
     // Note: We keep this as memory-using even if the kitty graphics
@@ -1772,7 +1777,7 @@ pub const Row = packed struct(u64) {
     /// screen.
     dirty: bool = false,
 
-    _padding: u22 = 0,
+    _padding: u5 = 0,
 
     /// Semantic prompt type.
     pub const SemanticPrompt = enum(u3) {
@@ -1796,6 +1801,19 @@ pub const Row = packed struct(u64) {
             return self == .prompt or self == .prompt_continuation or self == .input;
         }
     };
+
+    pub inline fn inputStartCol(self: Row) ?u16 {
+        return if (self.input_start_col_set) self.input_start_col else null;
+    }
+
+    pub inline fn setInputStartCol(self: *Row, col: ?u16) void {
+        if (col) |value| {
+            self.input_start_col = value;
+            self.input_start_col_set = true;
+        } else {
+            self.input_start_col_set = false;
+        }
+    }
 
     /// Returns true if this row has any managed memory outside of the
     /// row structure (graphemes, styles, etc.)
