@@ -2420,7 +2420,7 @@ fn stepInputPin(
     screen: *terminal.Screen,
     bounds: terminal.Selection,
     from: terminal.Pin,
-    direction: input.Binding.AdjustSelection,
+    direction: input.Binding.Action.AdjustSelection,
 ) terminal.Pin {
     const next = switch (direction) {
         .left => from.leftWrap(1),
@@ -2435,7 +2435,7 @@ fn stepInputPin(
 /// Caller must hold the renderer mutex.
 fn adjustPromptInputSelection(
     self: *Surface,
-    direction: input.Binding.AdjustSelection,
+    direction: input.Binding.Action.AdjustSelection,
 ) !PromptSelectionResult {
     if (direction != .left and direction != .right) return .not_handled;
     if (!self.config.inplace_command_editing) return .not_handled;
@@ -2484,7 +2484,8 @@ fn adjustPromptInputSelection(
     if (sel_ptr) |sel| {
         sel.endPtr().* = next;
     } else {
-        try self.setSelection(terminal.Selection.init(cursor, next, false));
+        try screen.select(terminal.Selection.init(cursor, next, false));
+        self.classifySelection();
     }
 
     self.sendArrowSequences(.{
