@@ -2299,7 +2299,7 @@ keybind: Keybinds = .{},
 /// area are replaced, and the feature is disabled during password input,
 /// mouse reporting, alternate screen, or IME preedit. Replacement uses
 /// arrow/delete sequences, so shells with custom delete bindings may vary.
-@"inplace-command-editing": bool = false,
+@"inplace-command-editing": bool = true,
 
 /// The action to take when the user right-clicks on the terminal surface.
 ///
