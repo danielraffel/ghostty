@@ -6983,6 +6983,58 @@ test "Surface: selectionEligibleForEdit gating" {
     try testing.expect(!selectionEligibleForEdit(&t, sel_ok, true, false, false));
 }
 
+test "Surface: performEditReplacement ignores edit_selection_active gate" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var mutex = std.Thread.Mutex{};
+    var mailbox = try termio.Mailbox.initSPSC(alloc);
+    defer mailbox.deinit(alloc);
+
+    var surface: Surface = undefined;
+    surface.io.terminal = try terminal.Terminal.init(alloc, .{ .cols = 10, .rows = 2 });
+    defer surface.io.terminal.deinit(alloc);
+    surface.io.mailbox = mailbox;
+    surface.renderer_state = .{
+        .mutex = &mutex,
+        .terminal = &surface.io.terminal,
+        .inspector = null,
+        .preedit = null,
+        .mouse = .{},
+    };
+    surface.io.renderer_state = &surface.renderer_state;
+    surface.readonly = false;
+    surface.edit_selection_active = false;
+    surface.config = undefined;
+    surface.config.inplace_command_editing = true;
+
+    surface.io.terminal.flags.semantic_prompt_seen = true;
+    surface.io.terminal.screens.active.cursorAbsolute(4, 0);
+
+    const row = surface.io.terminal.screens.active.pages.pin(.{ .active = .{ .x = 0, .y = 0 } }).?.rowAndCell().row;
+    row.semantic_prompt = .input;
+    row.setInputStartCol(2);
+
+    const sel = terminal.Selection.init(
+        surface.io.terminal.screens.active.pages.pin(.{ .active = .{ .x = 2, .y = 0 } }).?,
+        surface.io.terminal.screens.active.pages.pin(.{ .active = .{ .x = 4, .y = 0 } }).?,
+        false,
+    );
+    try surface.io.terminal.screens.active.select(sel);
+    try testing.expect(selectionEligibleForEdit(
+        &surface.io.terminal,
+        surface.io.terminal.screens.active.selection.?,
+        true,
+        false,
+        false,
+    ));
+
+    surface.renderer_state.mutex.lock();
+    defer surface.renderer_state.mutex.unlock();
+    try testing.expect(surface.performEditReplacement());
+    try testing.expect(surface.io.terminal.screens.active.selection == null);
+}
+
 test "Surface: arrowSequence respects cursor_keys" {
     const testing = std.testing;
     const alloc = testing.allocator;
