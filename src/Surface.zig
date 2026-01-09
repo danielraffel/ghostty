@@ -2816,6 +2816,16 @@ pub fn keyCallback(
         break :event copy;
     };
 
+    if (event.action == .press and
+        event.utf8.len > 0 and
+        !event.composing and
+        self.edit_selection_active)
+    {
+        self.renderer_state.mutex.lock();
+        defer self.renderer_state.mutex.unlock();
+        _ = self.performEditReplacement();
+    }
+
     // Encode and send our key. If we didn't encode anything, then we
     // return the effect as ignored.
     if (try self.encodeKey(
@@ -4408,6 +4418,46 @@ fn sendArrowSequences(self: *Surface, path: terminal.Screen.CursorPath) void {
     }
 }
 
+fn sendDeleteSequences(self: *Surface, count: usize) void {
+    if (count == 0) return;
+
+    const delete_key = "\x1b[3~";
+    for (0..count) |_| {
+        self.queueIo(.{ .write_stable = delete_key }, .locked);
+    }
+}
+
+/// Performs an in-place selection replacement. Caller must hold the renderer mutex.
+fn performEditReplacement(self: *Surface) bool {
+    if (!self.edit_selection_active) return false;
+
+    const t = &self.io.terminal;
+    const screen = t.screens.active;
+    const sel = screen.selection orelse {
+        self.edit_selection_active = false;
+        return false;
+    };
+
+    if (!selectionEligibleForEdit(
+        t,
+        sel,
+        self.config.inplace_command_editing,
+        self.readonly,
+        self.renderer_state.preedit != null,
+    )) {
+        self.edit_selection_active = false;
+        return false;
+    }
+
+    const ordered = sel.ordered(screen, .forward);
+    const path = screen.inputPath(screen.cursor.page_pin.*, ordered.start());
+    self.sendArrowSequences(path);
+    self.sendDeleteSequences(screen.countInputCharacters(sel));
+
+    screen.clearSelection();
+    self.edit_selection_active = false;
+    return true;
+}
 /// Performs the "click-to-move" logic to move the cursor to the given
 /// screen point if possible. This works by converting the path to the
 /// given point into a series of arrow key inputs.
@@ -6279,6 +6329,11 @@ fn completeClipboardPaste(
     const encode_opts: input.paste.Options = encode_opts: {
         self.renderer_state.mutex.lock();
         defer self.renderer_state.mutex.unlock();
+
+        if (self.edit_selection_active) {
+            _ = self.performEditReplacement();
+        }
+
         const opts: input.paste.Options = .fromTerminal(&self.io.terminal);
 
         // If we have paste protection enabled, we detect unsafe pastes and return
