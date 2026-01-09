@@ -4,6 +4,31 @@ This is a quick, local guide for building and testing Ghostty on macOS using the
 
 The helper script writes a log to `ai/output/macos-build-test-<timestamp>.log`, the app bundle is created at `.zig-cache/xcodebuild/Build/Products/<config>/Ghostty.app`, and Xcode output is stored under `.zig-cache/xcodebuild` (sandbox-friendly).
 
+## Release (macOS)
+
+Use the release helper to build a ReleaseFast app, code sign, notarize, staple, zip, and publish to GitHub Releases via `gh`.
+
+Setup (one time):
+
+```sh
+cp ai/.env.example ai/.env
+open -e ai/.env
+```
+
+Fill in your Apple + GitHub values. `ai/.env` is ignored by git.
+
+Run:
+
+```sh
+PUSH_RELEASE=1 ai/scripts/macos-release.sh
+```
+
+Notes:
+- The script refuses to run if tracked files have uncommitted changes.
+- It builds with `zig build -Doptimize=ReleaseFast` and uses `GhosttyReleaseLocal.entitlements`.
+- If `INSTALLER_CERT` is set, it also builds/signs/notarizes a `.pkg` and uploads it.
+- Release assets are written to `ai/output/` and uploaded to the GitHub release for the tag in `build.zig.zon`.
+
 ## Prerequisites
 
 - Zig installed and available in `PATH`.

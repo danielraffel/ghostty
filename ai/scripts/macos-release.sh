@@ -44,8 +44,8 @@ require_env GITHUB_USER
 
 GITHUB_REPO="${GITHUB_REPO:-ghostty}"
 
-if [[ -n "$(git status --porcelain)" ]]; then
-  echo "Working tree is dirty. Commit or stash before releasing." >&2
+if ! git diff --quiet || ! git diff --cached --quiet; then
+  echo "Working tree has uncommitted changes in tracked files." >&2
   exit 1
 fi
 
