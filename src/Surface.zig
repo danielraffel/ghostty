@@ -2422,7 +2422,13 @@ fn inputEndPin(
     var row_pin = ordered.end();
     while (true) {
         const row = row_pin.rowAndCell().row;
-        if (row.inputStartCol() != null) break;
+        // Check if row has inputStartCol AND has actual text content.
+        // Blank rows from trailing newlines have inputStartCol but no text,
+        // and should be skipped to find the last row with actual input.
+        if (row.inputStartCol() != null) {
+            const cells = row_pin.node.data.getCells(row);
+            if (terminal.page.Cell.hasTextAny(cells)) break;
+        }
         if (row_pin.eql(start)) break;
         row_pin = row_pin.up(1) orelse break;
     }
@@ -2676,6 +2682,13 @@ fn stepInputPin(
     };
     if (next_opt) |next| {
         const clamped = clampInputPin(screen, bounds, next);
+        // If moving vertically and we couldn't reach the target row (clamped to
+        // a different row), return the original position since no row change occurred.
+        if ((direction == .up or direction == .down) and
+            (clamped.node != next.node or clamped.y != next.y))
+        {
+            return from;
+        }
         return clampInputPinRow(screen, bounds, clamped);
     }
 
@@ -7705,13 +7718,15 @@ test "Surface: prompt input selection clamps to input end" {
     try testing.expectEqual(@as(usize, 0), sel_down.end().x);
     try testing.expectEqual(@as(usize, 1), sel_down.end().y);
 
+    // Second shift+down should stay at row 1 since row 2 is empty.
+    // Selection should not extend past the last row with actual text.
     try testing.expectEqual(
-        PromptSelectionResult.handled_changed,
+        PromptSelectionResult.handled_no_change,
         try surface.adjustPromptInputSelection(.down),
     );
     const sel_clamped = surface.io.terminal.screens.active.selection.?;
     try testing.expectEqual(@as(usize, 0), sel_clamped.end().x);
-    try testing.expectEqual(@as(usize, 2), sel_clamped.end().y);
+    try testing.expectEqual(@as(usize, 1), sel_clamped.end().y);
 }
 
 test "Surface: prompt input selection up from insertion keeps column" {
