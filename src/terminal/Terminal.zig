@@ -11093,6 +11093,43 @@ test "Terminal: input_start_col propagates on linefeed" {
     try testing.expectEqual(@as(Row.SemanticPrompt, .input), t.screens.active.cursor.page_row.semantic_prompt);
 }
 
+test "Terminal: semantic_prompt propagates through multiple linefeeds with scrolling" {
+    const alloc = testing.allocator;
+    // Small screen to force scrolling
+    var t = try init(alloc, .{ .cols = 10, .rows = 5 });
+    defer t.deinit(alloc);
+
+    // Mark as input
+    t.markSemanticPrompt(.input);
+
+    // Perform many linefeeds (more than screen rows to cause scrolling)
+    for (0..10) |_| {
+        try t.linefeed();
+    }
+
+    // All visible rows should have .input semantic_prompt
+    for (0..5) |y| {
+        const cell = t.screens.active.pages.getCell(.{ .active = .{ .x = 0, .y = @intCast(y) } }).?;
+        try testing.expectEqual(@as(Row.SemanticPrompt, .input), cell.row.semantic_prompt);
+    }
+
+    // Scrollback rows should also have .input
+    // The cursor started at row 0 and we did 10 linefeeds on a 5-row screen.
+    // Check that scrollback has correct semantic_prompt using the scrollback iterator.
+    var it = t.screens.active.pages.rowIterator(
+        .left_up,
+        .{ .active = .{ .x = 0, .y = 0 } },
+        null,
+    );
+    var count: usize = 0;
+    while (it.next()) |pin| {
+        const row = pin.rowAndCell().row;
+        try testing.expectEqual(@as(Row.SemanticPrompt, .input), row.semantic_prompt);
+        count += 1;
+        if (count >= 10) break; // Check up to 10 rows including scrollback
+    }
+}
+
 test "Terminal: input_start_col propagates on wrap" {
     const alloc = testing.allocator;
     var t = try init(alloc, .{ .cols = 3, .rows = 3 });
