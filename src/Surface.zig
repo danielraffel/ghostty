@@ -2422,13 +2422,13 @@ fn inputEndPin(
     var row_pin = ordered.end();
     while (true) {
         const row = row_pin.rowAndCell().row;
-        // Check if row has inputStartCol AND has actual text content.
-        // Blank rows from trailing newlines have inputStartCol but no text,
-        // and should be skipped to find the last row with actual input.
-        if (row.inputStartCol() != null) {
-            const cells = row_pin.node.data.getCells(row);
-            if (terminal.page.Cell.hasTextAny(cells)) break;
-        }
+        // Check if row has actual text content. Blank rows from trailing
+        // newlines should be skipped to find the last row with actual input.
+        // Note: We don't require inputStartCol != null here because soft-wrapped
+        // continuation rows don't have inputStartCol set, but they're still
+        // valid input within the bounds returned by selectPrompt/inputBounds.
+        const cells = row_pin.node.data.getCells(row);
+        if (terminal.page.Cell.hasTextAny(cells)) break;
         if (row_pin.eql(start)) break;
         row_pin = row_pin.up(1) orelse break;
     }
@@ -7871,6 +7871,45 @@ test "Surface: inputEndPin returns insertion point" {
     try testing.expectEqual(terminal.point.Point{ .screen = .{
         .x = 1,
         .y = 1,
+    } }, screen.pages.pointFromPin(.screen, end_pin).?);
+}
+
+test "Surface: inputEndPin finds soft-wrapped continuation rows" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    // Simulate a soft-wrapped line (row 0 wraps to row 1) followed by an empty row (row 2).
+    // Row 1 (continuation) won't have inputStartCol set, but should still be found.
+    var t = try terminal.Terminal.init(alloc, .{ .cols = 6, .rows = 3 });
+    defer t.deinit(alloc);
+
+    const screen = t.screens.active;
+    // Write text that wraps: "abcdef" fills row 0, "gh" goes to row 1
+    try screen.testWriteString("abcdefgh");
+
+    // Mark row 0 as wrapped (soft wrap, not hard newline)
+    const row0 = screen.pages.pin(.{ .active = .{ .x = 0, .y = 0 } }).?.rowAndCell().row;
+    row0.semantic_prompt = .input;
+    row0.setInputStartCol(0);
+    row0.wrap = true; // Soft wrap - no newline
+
+    // Row 1 is continuation - has text but NO inputStartCol (simulating shell behavior)
+    const row1 = screen.pages.pin(.{ .active = .{ .x = 0, .y = 1 } }).?.rowAndCell().row;
+    row1.semantic_prompt = .unknown; // Shell doesn't mark continuation rows
+
+    // Row 2 is empty but marked as input (trailing empty row from paste)
+    const row2 = screen.pages.pin(.{ .active = .{ .x = 0, .y = 2 } }).?.rowAndCell().row;
+    row2.semantic_prompt = .input;
+    row2.setInputStartCol(0);
+
+    const bounds = screen.inputBounds(screen.pages.pin(.{ .active = .{ .x = 0, .y = 0 } }).?).?;
+    const end_pin = inputEndPin(screen, bounds);
+
+    // inputEndPin should find row 1 (has text "gh"), not row 0 (would skip continuation)
+    // and not row 2 (empty)
+    try testing.expectEqual(terminal.point.Point{ .screen = .{
+        .x = 2, // insertion point after "gh"
+        .y = 1, // row 1, the continuation row
     } }, screen.pages.pointFromPin(.screen, end_pin).?);
 }
 
