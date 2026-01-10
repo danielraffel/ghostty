@@ -822,6 +822,9 @@ pub fn carriageReturn(self: *Terminal) void {
 /// Linefeed moves the cursor to the next line.
 pub fn linefeed(self: *Terminal) !void {
     const old_prompt = self.screens.active.cursor.page_row.semantic_prompt;
+    // An explicit linefeed means the current row does not soft-wrap to the next.
+    // Reset the wrap flag so character counting treats this as a hard newline.
+    self.screens.active.cursorResetWrap();
     try self.index();
     if (self.modes.get(.linefeed)) self.carriageReturn();
     if (old_prompt == .input) {
