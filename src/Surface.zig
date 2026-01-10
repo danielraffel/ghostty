@@ -5025,7 +5025,19 @@ fn inputClickMoveTarget(
     const screen = t.screens.active;
     const from = screen.cursor.page_pin.*;
     const bounds = inputSelectionBounds(screen, from) orelse return null;
-    if (!bounds.contains(screen, to)) return null;
+
+    // Check if click row is within input bounds. We check rows only (not columns)
+    // because clicking past end-of-line should snap to that row's input end,
+    // which clampInputPinRow handles below.
+    const ordered = bounds.ordered(screen, .forward);
+    const start_row = ordered.start();
+    const end_row = ordered.end();
+    const to_before_start = to.before(start_row) and
+        (to.node != start_row.node or to.y != start_row.y);
+    const to_after_end = end_row.before(to) and
+        (to.node != end_row.node or to.y != end_row.y);
+    if (to_before_start or to_after_end) return null;
+
     const clamped = clampInputPinRow(screen, bounds, to);
     if (from.eql(clamped)) return null;
 
