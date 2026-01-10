@@ -572,9 +572,11 @@ pub const StreamHandler = struct {
     }
 
     inline fn linefeed(self: *StreamHandler) !void {
-        // Small optimization: call index instead of linefeed because they're
-        // identical and this avoids one layer of function call overhead.
-        try self.terminal.index();
+        // Must call the full linefeed (not index) to preserve semantic_prompt
+        // state for multiline input. The linefeed function propagates .input
+        // semantic markers to new rows, which is needed for proper prompt/input
+        // selection bounds in inplace command editing.
+        try self.terminal.linefeed();
     }
 
     pub inline fn reverseIndex(self: *StreamHandler) !void {
