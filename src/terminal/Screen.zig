@@ -1318,8 +1318,20 @@ pub fn clearRows(
                 // cleared unprotected cells.
                 row.cells = cells_offset;
             } else {
+                const old_semantic = row.semantic_prompt;
+                const old_input_start = row.inputStartCol();
+
                 self.clearCells(&chunk.node.data, row, cells);
                 row.* = .{ .cells = cells_offset };
+
+                // Preserve prompt metadata across clear operations so prompt redraws
+                // don't drop input bounds on blank lines.
+                if (old_semantic.promptOrInput()) {
+                    row.semantic_prompt = old_semantic;
+                    if (old_semantic == .input) {
+                        row.setInputStartCol(old_input_start orelse 0);
+                    }
+                }
             }
 
             row.dirty = true;
@@ -2802,21 +2814,39 @@ pub fn selectPrompt(self: *Screen, pin: Pin) ?Selection {
         var it = pin.rowIterator(.right_down, null);
         var it_prev = it.next().?;
         it_prev.x = it_prev.node.data.size.cols - 1;
+        // Track the last row with known prompt/input. Unknown rows between
+        // prompt/input rows (e.g., blank lines from Option+Return) are included.
+        var last_prompt_input = it_prev;
+        last_prompt_input.x = last_prompt_input.node.data.size.cols - 1;
         while (it.next()) |p| {
             const row = p.rowAndCell().row;
             switch (row.semantic_prompt) {
                 // A prompt, we continue searching.
-                .prompt, .prompt_continuation, .input => {},
+                .prompt, .prompt_continuation, .input => {
+                    // Include any unknown rows we passed through since they're
+                    // sandwiched between prompt/input rows.
+                    last_prompt_input = p;
+                    last_prompt_input.x = last_prompt_input.node.data.size.cols - 1;
+                },
 
-                // Command output or unknown, definitely not a prompt.
-                .command, .unknown => break :end it_prev,
+                // Command output definitely ends the prompt.
+                .command => break :end last_prompt_input,
+
+                // Unknown rows might be blank lines within multiline input.
+                // Continue scanning but don't update last_prompt_input yet.
+                // If we find more input, we'll include these rows; if we hit
+                // command output, we'll stop at the last known prompt/input.
+                .unknown => {},
             }
 
             it_prev = p;
             it_prev.x = it_prev.node.data.size.cols - 1;
         }
 
-        break :end it_prev;
+        // Reached end of screen without hitting command output.
+        // Return last known prompt/input row to avoid including trailing
+        // unknown rows that aren't part of the input.
+        break :end last_prompt_input;
     };
 
     return .init(start, end, false);
@@ -3705,6 +3735,24 @@ test "Screen clearRows active multi line" {
     const str = try s.dumpStringAlloc(alloc, .{ .screen = .{} });
     defer alloc.free(str);
     try testing.expectEqualStrings("", str);
+}
+
+test "Screen clearRows preserves input bounds" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try Screen.init(alloc, .{ .cols = 10, .rows = 3, .max_scrollback = 0 });
+    defer s.deinit();
+
+    const row_pin = s.pages.pin(.{ .active = .{ .x = 0, .y = 0 } }).?;
+    row_pin.rowAndCell().row.semantic_prompt = .input;
+    row_pin.rowAndCell().row.setInputStartCol(2);
+
+    s.clearRows(.{ .active = .{} }, .{ .active = .{ .y = 0 } }, false);
+
+    const row = s.pages.pin(.{ .active = .{ .x = 0, .y = 0 } }).?.rowAndCell().row;
+    try testing.expectEqual(Row.SemanticPrompt.input, row.semantic_prompt);
+    try testing.expectEqual(@as(?u16, 2), row.inputStartCol());
 }
 
 test "Screen clearRows active styled line" {
@@ -8300,6 +8348,103 @@ test "Screen: selectPrompt prompt at end" {
         try testing.expectEqual(point.Point{ .screen = .{
             .x = 9,
             .y = 3,
+        } }, s.pages.pointFromPin(.screen, sel.end()).?);
+    }
+}
+
+test "Screen: selectPrompt spans unknown rows between input" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(alloc, .{ .cols = 10, .rows = 10, .max_scrollback = 0 });
+    defer s.deinit();
+
+    // Simulate multiline input with a blank line (Option+Return scenario).
+    // The blank line might have .unknown semantic_prompt if linefeed
+    // didn't properly propagate it.
+    // zig fmt: off
+    {
+                                                                // line number:
+        try s.testWriteSemanticString("$ ", .prompt);           // 0 prompt
+        try s.testWriteSemanticString("hello\n", .input);       // 0 input
+        // Row 1 simulates a blank line that got .unknown (the bug scenario)
+        try s.testWriteSemanticString("\n", .unknown);          // 1 (blank, unknown)
+        try s.testWriteSemanticString("world", .input);         // 2 input
+    }
+    // zig fmt: on
+
+    s.pages.pin(.{ .active = .{ .x = 0, .y = 0 } }).?.rowAndCell().row.setInputStartCol(2);
+    // Row 1 has no input_start_col set (blank line)
+    s.pages.pin(.{ .active = .{ .x = 0, .y = 2 } }).?.rowAndCell().row.setInputStartCol(0);
+
+    // selectPrompt should span rows 0-2, including the unknown blank line
+    {
+        var sel = s.selectPrompt(s.pages.pin(.{ .active = .{
+            .x = 3,
+            .y = 0,
+        } }).?).?;
+        defer sel.deinit(&s);
+        try testing.expectEqual(point.Point{ .screen = .{
+            .x = 0,
+            .y = 0,
+        } }, s.pages.pointFromPin(.screen, sel.start()).?);
+        // End should be row 2 (the last .input row), not row 0
+        try testing.expectEqual(point.Point{ .screen = .{
+            .x = 9,
+            .y = 2,
+        } }, s.pages.pointFromPin(.screen, sel.end()).?);
+    }
+
+    // inputBounds should also work correctly
+    {
+        const bounds = s.inputBounds(s.pages.pin(.{ .active = .{ .x = 3, .y = 0 } }).?).?;
+        try testing.expectEqual(point.Point{ .screen = .{
+            .x = 2,
+            .y = 0,
+        } }, s.pages.pointFromPin(.screen, bounds.start()).?);
+        try testing.expectEqual(point.Point{ .screen = .{
+            .x = 9,
+            .y = 2,
+        } }, s.pages.pointFromPin(.screen, bounds.end()).?);
+    }
+}
+
+test "Screen: selectPrompt stops at command after unknown" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(alloc, .{ .cols = 10, .rows = 10, .max_scrollback = 0 });
+    defer s.deinit();
+
+    // Verify that we don't over-extend through unknown rows when followed by command.
+    // zig fmt: off
+    {
+                                                                // line number:
+        try s.testWriteSemanticString("$ ", .prompt);           // 0 prompt
+        try s.testWriteSemanticString("hello\n", .input);       // 0 input
+        try s.testWriteSemanticString("\n", .unknown);          // 1 (blank, unknown)
+        try s.testWriteSemanticString("output", .command);      // 2 command
+    }
+    // zig fmt: on
+
+    s.pages.pin(.{ .active = .{ .x = 0, .y = 0 } }).?.rowAndCell().row.setInputStartCol(2);
+
+    // selectPrompt should stop at the last known input row (row 0),
+    // NOT extending through the unknown row to the command.
+    {
+        var sel = s.selectPrompt(s.pages.pin(.{ .active = .{
+            .x = 3,
+            .y = 0,
+        } }).?).?;
+        defer sel.deinit(&s);
+        try testing.expectEqual(point.Point{ .screen = .{
+            .x = 0,
+            .y = 0,
+        } }, s.pages.pointFromPin(.screen, sel.start()).?);
+        // End should be row 0 (the last .input row before unknown->command)
+        try testing.expectEqual(point.Point{ .screen = .{
+            .x = 9,
+            .y = 0,
         } }, s.pages.pointFromPin(.screen, sel.end()).?);
     }
 }
