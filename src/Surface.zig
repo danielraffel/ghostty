@@ -2507,11 +2507,11 @@ fn inputCursorIndex(
 
 fn inputMoveCount(
     screen: *terminal.Screen,
+    bounds: terminal.Selection,
     from: terminal.Pin,
     to: terminal.Pin,
 ) usize {
     if (from.eql(to)) return 0;
-    const bounds = screen.inputBounds(from) orelse return 0;
     const clamped_from = clampInputPinRow(
         screen,
         bounds,
@@ -2553,10 +2553,11 @@ fn inputSelectionCharacterCount(
 fn sendInputCursorMove(
     self: *Surface,
     screen: *terminal.Screen,
+    bounds: terminal.Selection,
     from: terminal.Pin,
     to: terminal.Pin,
 ) void {
-    const count = inputMoveCount(screen, from, to);
+    const count = inputMoveCount(screen, bounds, from, to);
     if (count == 0) return;
 
     const arrow = arrowSequence(&self.io.terminal, if (to.before(from)) .left else .right);
@@ -2768,7 +2769,7 @@ fn adjustPromptInputSelection(
         self.classifySelection();
     }
 
-    self.sendInputCursorMove(screen, sel_end, next);
+    self.sendInputCursorMove(screen, bounds, sel_end, next);
     screen.dirty.selection = true;
     return .handled_changed;
 }
@@ -2814,7 +2815,9 @@ fn collapsePromptInputSelection(
 
     screen.clearSelection();
     self.edit_selection_active = false;
-    self.sendInputCursorMove(screen, cursor, target);
+    // Use inputSelectionBounds for consistency with selection logic
+    const selection_bounds = inputSelectionBounds(screen, cursor) orelse bounds;
+    self.sendInputCursorMove(screen, selection_bounds, cursor, target);
     screen.dirty.selection = true;
     return true;
 }
@@ -4472,9 +4475,12 @@ pub fn mouseButtonCallback(
 
         try screen.select(sel);
         self.classifySelection();
+        const cursor = screen.cursor.page_pin.*;
+        const bounds = inputSelectionBounds(screen, cursor) orelse break :prompt_shift_click;
         self.sendInputCursorMove(
             screen,
-            screen.cursor.page_pin.*,
+            bounds,
+            cursor,
             sel.end(),
         );
         screen.dirty.selection = true;
@@ -4931,7 +4937,9 @@ fn performEditReplacement(self: *Surface) bool {
     }
 
     const ordered = sel.ordered(screen, .forward);
-    self.sendInputCursorMove(screen, screen.cursor.page_pin.*, ordered.start());
+    const cursor = screen.cursor.page_pin.*;
+    const bounds = inputSelectionBounds(screen, cursor) orelse return false;
+    self.sendInputCursorMove(screen, bounds, cursor, ordered.start());
     self.sendDeleteSequences(inputSelectionCharacterCount(screen, sel));
 
     screen.clearSelection();
@@ -5047,7 +5055,8 @@ fn clickMoveCursorInput(self: *Surface, to: terminal.Pin) !void {
     const target = inputClickMoveTarget(&self.io.terminal, to) orelse return;
     const screen = self.io.terminal.screens.active;
     const from = screen.cursor.page_pin.*;
-    self.sendInputCursorMove(screen, from, target);
+    const bounds = inputSelectionBounds(screen, from) orelse return;
+    self.sendInputCursorMove(screen, bounds, from, target);
 }
 
 const Link = struct {
@@ -7796,11 +7805,12 @@ test "Surface: inputMoveCount counts empty endpoints" {
 
     const from_text = screen.pages.pin(.{ .active = .{ .x = 0, .y = 0 } }).?;
     const to_empty = screen.pages.pin(.{ .active = .{ .x = 3, .y = 0 } }).?;
-    try testing.expectEqual(@as(usize, 3), inputMoveCount(screen, from_text, to_empty));
+    const bounds = screen.inputBounds(from_text).?;
+    try testing.expectEqual(@as(usize, 3), inputMoveCount(screen, bounds, from_text, to_empty));
 
     const from_empty = to_empty;
     const to_text = screen.pages.pin(.{ .active = .{ .x = 1, .y = 0 } }).?;
-    try testing.expectEqual(@as(usize, 2), inputMoveCount(screen, from_empty, to_text));
+    try testing.expectEqual(@as(usize, 2), inputMoveCount(screen, bounds, from_empty, to_text));
 }
 
 test "Surface: inputSelectionCharacterCount is half-open" {
@@ -7845,7 +7855,8 @@ test "Surface: inputMoveCount treats hard newline as single move" {
 
     const from_end = screen.pages.pin(.{ .active = .{ .x = 2, .y = 0 } }).?;
     const to_start = screen.pages.pin(.{ .active = .{ .x = 0, .y = 1 } }).?;
-    try testing.expectEqual(@as(usize, 1), inputMoveCount(screen, from_end, to_start));
+    const bounds = screen.inputBounds(from_end).?;
+    try testing.expectEqual(@as(usize, 1), inputMoveCount(screen, bounds, from_end, to_start));
 }
 
 test "Surface: inputEndPin returns insertion point" {
