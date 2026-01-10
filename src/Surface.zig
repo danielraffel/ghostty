@@ -7898,7 +7898,9 @@ test "Surface: inputClickMoveTarget gating" {
     const target_opt = inputClickMoveTarget(&t, to_inside);
     try testing.expect(target_opt != null);
     const target = target_opt.?;
-    try testing.expect(target.eql(to_inside));
+    const bounds = t.screens.active.inputBounds(t.screens.active.cursor.page_pin.*).?;
+    const clamped = clampInputPinRow(t.screens.active, bounds, to_inside);
+    try testing.expect(target.eql(clamped));
 
     const to_outside = t.screens.active.pages.pin(.{ .active = .{ .x = 1, .y = 0 } }).?;
     try testing.expect(inputClickMoveTarget(&t, to_outside) == null);
