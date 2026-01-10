@@ -2814,8 +2814,9 @@ pub fn selectPrompt(self: *Screen, pin: Pin) ?Selection {
         var it = pin.rowIterator(.right_down, null);
         var it_prev = it.next().?;
         it_prev.x = it_prev.node.data.size.cols - 1;
-        // Track the last row with known prompt/input. Unknown rows between
-        // prompt/input rows (e.g., blank lines from Option+Return) are included.
+        // Track the last row with known prompt/input. Unknown rows are only
+        // included if we can confirm they contain text (prompt redraws can
+        // drop semantic markers), or if we later see more prompt/input rows.
         var last_prompt_input = it_prev;
         last_prompt_input.x = last_prompt_input.node.data.size.cols - 1;
         while (it.next()) |p| {
@@ -2833,10 +2834,17 @@ pub fn selectPrompt(self: *Screen, pin: Pin) ?Selection {
                 .command => break :end last_prompt_input,
 
                 // Unknown rows might be blank lines within multiline input.
-                // Continue scanning but don't update last_prompt_input yet.
-                // If we find more input, we'll include these rows; if we hit
-                // command output, we'll stop at the last known prompt/input.
-                .unknown => {},
+                // Continue scanning but only update last_prompt_input if the
+                // row contains text (prompt/input redraws can clear markers).
+                // If we find more input later, we'll include these rows; if we
+                // hit command output, we'll stop at the last known prompt/input.
+                .unknown => if (saw_semantic_prompt) {
+                    const cells = p.node.data.getCells(row);
+                    if (Cell.hasTextAny(cells)) {
+                        last_prompt_input = p;
+                        last_prompt_input.x = last_prompt_input.node.data.size.cols - 1;
+                    }
+                },
             }
 
             it_prev = p;
@@ -8445,6 +8453,45 @@ test "Screen: selectPrompt stops at command after unknown" {
         try testing.expectEqual(point.Point{ .screen = .{
             .x = 9,
             .y = 0,
+        } }, s.pages.pointFromPin(.screen, sel.end()).?);
+    }
+}
+
+test "Screen: selectPrompt spans unknown text rows after input" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(alloc, .{ .cols = 10, .rows = 10, .max_scrollback = 0 });
+    defer s.deinit();
+
+    // Simulate multiline input where prompt/input markers were lost after the
+    // first line, but the subsequent rows still contain input text.
+    // zig fmt: off
+    {
+                                                                // line number:
+        try s.testWriteSemanticString("$ ", .prompt);           // 0 prompt
+        try s.testWriteSemanticString("hello\n", .input);       // 0 input
+        try s.testWriteSemanticString("world\n", .unknown);     // 1 unknown with text
+        try s.testWriteSemanticString("again", .unknown);       // 2 unknown with text
+    }
+    // zig fmt: on
+
+    s.pages.pin(.{ .active = .{ .x = 0, .y = 0 } }).?.rowAndCell().row.setInputStartCol(2);
+
+    // selectPrompt should span rows 0-2, including unknown rows with text.
+    {
+        var sel = s.selectPrompt(s.pages.pin(.{ .active = .{
+            .x = 3,
+            .y = 0,
+        } }).?).?;
+        defer sel.deinit(&s);
+        try testing.expectEqual(point.Point{ .screen = .{
+            .x = 0,
+            .y = 0,
+        } }, s.pages.pointFromPin(.screen, sel.start()).?);
+        try testing.expectEqual(point.Point{ .screen = .{
+            .x = 9,
+            .y = 2,
         } }, s.pages.pointFromPin(.screen, sel.end()).?);
     }
 }
