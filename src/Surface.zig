@@ -2401,19 +2401,147 @@ const PromptSelectionResult = enum {
     handled_changed,
 };
 
+fn inputLastTextPin(
+    screen: *terminal.Screen,
+    bounds: terminal.Selection,
+) ?terminal.Pin {
+    const ordered = bounds.ordered(screen, .forward);
+    var it = ordered.end().cellIterator(.left_up, ordered.start());
+    while (it.next()) |p| {
+        if (p.rowAndCell().cell.hasText()) return p;
+    }
+    return null;
+}
+
+fn inputEndPin(
+    screen: *terminal.Screen,
+    bounds: terminal.Selection,
+) terminal.Pin {
+    const ordered = bounds.ordered(screen, .forward);
+    const start = ordered.start();
+    var row_pin = ordered.end();
+    while (true) {
+        const row = row_pin.rowAndCell().row;
+        if (row.inputStartCol() != null) break;
+        if (row_pin.eql(start)) break;
+        row_pin = row_pin.up(1) orelse break;
+    }
+
+    var result = row_pin;
+    result.x = @intCast(inputRowEndCol(screen, row_pin, bounds));
+    return result;
+}
+
+fn inputSelectionBounds(
+    screen: *terminal.Screen,
+    cursor: terminal.Pin,
+) ?terminal.Selection {
+    const bounds = screen.inputBounds(cursor) orelse return null;
+    const ordered = bounds.ordered(screen, .forward);
+    const start = ordered.start();
+    var end = inputEndPin(screen, bounds);
+    if (end.before(start)) end = start;
+    return terminal.Selection.init(start, end, false);
+}
+
+fn inputCursorIndex(
+    screen: *terminal.Screen,
+    bounds: terminal.Selection,
+    pin: terminal.Pin,
+) usize {
+    const ordered = bounds.ordered(screen, .forward);
+    const start = ordered.start();
+    const end = ordered.end();
+    const cols: usize = @intCast(screen.pages.cols);
+    var index: usize = 0;
+
+    var row_pin = start;
+    while (true) {
+        const row = row_pin.rowAndCell().row;
+        const row_start = inputRowStartCol(row_pin, start);
+        var row_limit: usize = cols - 1;
+        if (row_pin.node == end.node and row_pin.y == end.y) {
+            row_limit = @as(usize, @intCast(end.x));
+        }
+
+        const is_pin_row = row_pin.node == pin.node and row_pin.y == pin.y;
+        const pin_x: usize = @intCast(pin.x);
+        var count_limit: ?usize = null;
+        if (is_pin_row) {
+            if (pin_x > row_start) {
+                count_limit = @min(pin_x - 1, row_limit);
+            }
+        } else {
+            count_limit = row_limit;
+        }
+
+        if (count_limit) |limit| {
+            if (row_start <= limit) {
+                const cells = row_pin.node.data.getCells(row);
+                var x = row_start;
+                while (x <= limit) : (x += 1) {
+                    const cell = cells[x];
+                    if (!cell.hasText()) continue;
+                    if (cell.wide == .spacer_tail) continue;
+                    index += 1;
+                }
+            }
+        }
+
+        if (is_pin_row) break;
+        if (!row.wrap) index += 1;
+
+        const next = row_pin.down(1) orelse break;
+        if (end.before(next)) break;
+        row_pin = next;
+    }
+
+    return index;
+}
+
 fn inputMoveCount(
     screen: *terminal.Screen,
     from: terminal.Pin,
     to: terminal.Pin,
 ) usize {
     if (from.eql(to)) return 0;
+    const bounds = screen.inputBounds(from) orelse return 0;
+    const clamped_from = clampInputPinRow(
+        screen,
+        bounds,
+        clampInputPin(screen, bounds, from),
+    );
+    const clamped_to = clampInputPinRow(
+        screen,
+        bounds,
+        clampInputPin(screen, bounds, to),
+    );
 
-    const ordered = if (to.before(from))
-        terminal.Selection.init(to, from, false)
-    else
-        terminal.Selection.init(from, to, false);
-    const count = screen.countInputCharacters(ordered);
-    return if (count == 0) 0 else count - 1;
+    const from_index = inputCursorIndex(screen, bounds, clamped_from);
+    const to_index = inputCursorIndex(screen, bounds, clamped_to);
+    return if (from_index >= to_index) from_index - to_index else to_index - from_index;
+}
+
+fn inputSelectionCharacterCount(
+    screen: *terminal.Screen,
+    sel: terminal.Selection,
+) usize {
+    const ordered = sel.ordered(screen, .forward);
+    const bounds = screen.inputBounds(ordered.start()) orelse return 0;
+    const start = clampInputPinRow(
+        screen,
+        bounds,
+        clampInputPin(screen, bounds, ordered.start()),
+    );
+    const end = clampInputPinRow(
+        screen,
+        bounds,
+        clampInputPin(screen, bounds, ordered.end()),
+    );
+
+    const start_index = inputCursorIndex(screen, bounds, start);
+    const end_index = inputCursorIndex(screen, bounds, end);
+    return if (end_index >= start_index) end_index - start_index else start_index - end_index;
 }
 
 fn sendInputCursorMove(
@@ -2446,21 +2574,127 @@ fn clampInputPin(
     return pin;
 }
 
+fn inputRowStartCol(
+    row_pin: terminal.Pin,
+    bounds_start: terminal.Pin,
+) usize {
+    const row = row_pin.rowAndCell().row;
+    var start: usize = if (row.inputStartCol()) |col| col else 0;
+    if (row_pin.node == bounds_start.node and row_pin.y == bounds_start.y) {
+        start = @max(start, @as(usize, @intCast(bounds_start.x)));
+    }
+    return start;
+}
+
+fn inputRowEndCol(
+    screen: *terminal.Screen,
+    row_pin: terminal.Pin,
+    bounds: terminal.Selection,
+) usize {
+    const ordered = bounds.ordered(screen, .forward);
+    const start = ordered.start();
+    const end = ordered.end();
+    const row_start = inputRowStartCol(row_pin, start);
+    var row_limit: usize = @as(usize, @intCast(screen.pages.cols - 1));
+    if (row_pin.node == end.node and row_pin.y == end.y) {
+        row_limit = @as(usize, @intCast(end.x));
+    }
+    if (row_start > row_limit) return row_start;
+
+    const row = row_pin.rowAndCell().row;
+    const cells = row_pin.node.data.getCells(row);
+    var x = row_limit;
+    while (true) {
+        if (cells[x].hasText()) break;
+        if (x == row_start) return row_start;
+        x -= 1;
+    }
+
+    const last_text = x;
+    if (row.wrap) return last_text;
+    if (last_text == row_limit) return last_text;
+
+    x = last_text + 1;
+    while (x <= row_limit) : (x += 1) {
+        const cell = cells[x];
+        if (cell.wide == .spacer_tail or cell.wide == .spacer_head) continue;
+        return x;
+    }
+
+    return last_text;
+}
+
+fn clampInputPinRow(
+    screen: *terminal.Screen,
+    bounds: terminal.Selection,
+    pin: terminal.Pin,
+) terminal.Pin {
+    const ordered = bounds.ordered(screen, .forward);
+    const start = ordered.start();
+    const row_start = inputRowStartCol(pin, start);
+    const row_end = inputRowEndCol(screen, pin, bounds);
+    var result = pin;
+    var x: usize = @as(usize, @intCast(result.x));
+    if (x < row_start) x = row_start;
+    if (x > row_end) x = row_end;
+    result.x = @intCast(x);
+    return result;
+}
+
 fn stepInputPin(
     screen: *terminal.Screen,
     bounds: terminal.Selection,
     from: terminal.Pin,
     direction: input.Binding.Action.AdjustSelection,
 ) terminal.Pin {
-    const next = switch (direction) {
+    var move_from = from;
+    if (direction == .up or direction == .down) {
+        const cell = move_from.rowAndCell().cell;
+        if (cell.wide == .spacer_tail) {
+            const ordered = bounds.ordered(screen, .forward);
+            const row_start = inputRowStartCol(move_from, ordered.start());
+            var x: usize = @intCast(move_from.x);
+            if (x > row_start) {
+                move_from = move_from.leftWrap(1) orelse move_from;
+                while (true) {
+                    const move_cell = move_from.rowAndCell().cell;
+                    if (move_cell.wide != .spacer_tail) break;
+                    x = @intCast(move_from.x);
+                    if (x == row_start) break;
+                    move_from = move_from.leftWrap(1) orelse break;
+                }
+            }
+        }
+    }
+
+    const next_opt = switch (direction) {
         .left => from.leftWrap(1),
         .right => from.rightWrap(1),
-        .up => from.up(1),
-        .down => from.down(1),
+        .up => move_from.up(1),
+        .down => move_from.down(1),
         else => null,
-    } orelse return from;
+    };
+    if (next_opt) |next| {
+        const clamped = clampInputPin(screen, bounds, next);
+        return clampInputPinRow(screen, bounds, clamped);
+    }
 
-    return clampInputPin(screen, bounds, next);
+    // When we can't move up/down a row (top/bottom of the screen),
+    // still extend to the start/end of the current input row.
+    if (direction == .up or direction == .down) {
+        const ordered = bounds.ordered(screen, .forward);
+        const row_start = inputRowStartCol(from, ordered.start());
+        const row_end = inputRowEndCol(screen, from, bounds);
+        const x: usize = @intCast(from.x);
+        const target_x = if (direction == .up) row_start else row_end;
+        if (x != target_x) {
+            var result = from;
+            result.x = @intCast(target_x);
+            return result;
+        }
+    }
+
+    return from;
 }
 
 /// Adjusts the selection by a single character within the prompt input area.
@@ -2481,7 +2715,7 @@ fn adjustPromptInputSelection(
 
     const screen = t.screens.active;
     const cursor = screen.cursor.page_pin.*;
-    const bounds = screen.inputBounds(cursor) orelse return .not_handled;
+    const bounds = inputSelectionBounds(screen, cursor) orelse return .not_handled;
 
     var sel_ptr: ?*terminal.Selection = null;
     var sel_end = cursor;
@@ -2526,11 +2760,59 @@ fn adjustPromptInputSelection(
     return .handled_changed;
 }
 
+/// Collapse prompt input selection on arrow keys without mutating input.
+/// Caller must hold the renderer mutex.
+fn collapsePromptInputSelection(
+    self: *Surface,
+    direction: input.Binding.Action.AdjustSelection,
+) bool {
+    if (direction != .left and direction != .right and direction != .up and direction != .down)
+        return false;
+    if (!self.config.inplace_command_editing) return false;
+    if (self.readonly or self.renderer_state.preedit != null) return false;
+
+    const t = &self.io.terminal;
+    if (t.screens.active_key != .primary) return false;
+    if (!t.flags.shell_redraws_prompt) return false;
+    if (!t.cursorIsAtPrompt()) return false;
+
+    const screen = t.screens.active;
+    const sel = screen.selection orelse return false;
+    if (!selectionEligibleForEdit(
+        t,
+        sel,
+        self.config.inplace_command_editing,
+        self.readonly,
+        self.renderer_state.preedit != null,
+    )) {
+        return false;
+    }
+
+    const cursor = screen.cursor.page_pin.*;
+    const bounds = screen.inputBounds(cursor) orelse return false;
+    const ordered_sel = sel.ordered(screen, .forward);
+    const target = switch (direction) {
+        .left => ordered_sel.start(),
+        .right => ordered_sel.end(),
+        .up => bounds.ordered(screen, .forward).start(),
+        .down => inputEndPin(screen, bounds),
+        else => return false,
+    };
+
+    screen.clearSelection();
+    self.edit_selection_active = false;
+    self.sendInputCursorMove(screen, cursor, target);
+    screen.dirty.selection = true;
+    return true;
+}
+
 /// Updates edit_selection_active based on the current selection.
 /// Caller must hold the renderer mutex.
 fn classifySelection(self: *Surface) void {
-    const sel = self.renderer_state.terminal.screens.active.selection orelse {
+    const screen = self.renderer_state.terminal.screens.active;
+    const sel = screen.selection orelse {
         self.edit_selection_active = false;
+        screen.selection_is_edit = false;
         return;
     };
 
@@ -2541,6 +2823,7 @@ fn classifySelection(self: *Surface) void {
         self.readonly,
         self.renderer_state.preedit != null,
     );
+    screen.selection_is_edit = self.edit_selection_active;
 }
 
 /// Change the cell size for the terminal grid. This can happen as
@@ -2842,6 +3125,26 @@ pub fn keyCallback(
             log.warn("error adding key event to inspector err={}", .{err});
         }
     };
+
+    if (event.action != .release and event.mods.empty()) collapse: {
+        const direction: input.Binding.Action.AdjustSelection = switch (event.key) {
+            .arrow_left => .left,
+            .arrow_right => .right,
+            .arrow_up => .up,
+            .arrow_down => .down,
+            else => break :collapse,
+        };
+
+        self.renderer_state.mutex.lock();
+        defer self.renderer_state.mutex.unlock();
+
+        if (self.collapsePromptInputSelection(direction)) {
+            self.scrollToBottom() catch |err| {
+                log.warn("error scrolling to bottom err={}", .{err});
+            };
+            return .consumed;
+        }
+    }
 
     // Handle keybindings first. We need to handle this on all events
     // (press, repeat, release) because a press may perform a binding but
@@ -4130,6 +4433,41 @@ pub fn mouseButtonCallback(
     // bottleneck.
     const shift_capture = self.mouseShiftCapture(true);
 
+    // Shift-click in prompt input extends selection from the cursor.
+    if (button == .left and action == .press and mods.shift) prompt_shift_click: {
+        self.renderer_state.mutex.lock();
+        defer self.renderer_state.mutex.unlock();
+
+        const screen: *terminal.Screen = self.renderer_state.terminal.screens.active;
+        const pos = try self.rt_surface.getCursorPos();
+        const pt_viewport = self.posToViewport(pos.x, pos.y);
+        const click_pin = screen.pages.pin(.{
+            .viewport = .{
+                .x = pt_viewport.x,
+                .y = pt_viewport.y,
+            },
+        }) orelse break :prompt_shift_click;
+
+        const sel = inputShiftClickSelection(
+            self.renderer_state.terminal,
+            click_pin,
+            screen.selection,
+            self.config.inplace_command_editing,
+            self.readonly,
+            self.renderer_state.preedit != null,
+        ) orelse break :prompt_shift_click;
+
+        try screen.select(sel);
+        self.classifySelection();
+        self.sendInputCursorMove(
+            screen,
+            screen.cursor.page_pin.*,
+            sel.end(),
+        );
+        screen.dirty.selection = true;
+        return true;
+    }
+
     // Shift-click continues the previous mouse state if we have a selection.
     // cursorPosCallback will also do a mouse report so we don't need to do any
     // of the logic below.
@@ -4581,7 +4919,7 @@ fn performEditReplacement(self: *Surface) bool {
 
     const ordered = sel.ordered(screen, .forward);
     self.sendInputCursorMove(screen, screen.cursor.page_pin.*, ordered.start());
-    self.sendDeleteSequences(screen.countInputCharacters(sel));
+    self.sendDeleteSequences(inputSelectionCharacterCount(screen, sel));
 
     screen.clearSelection();
     self.edit_selection_active = false;
@@ -4654,9 +4992,41 @@ fn inputClickMoveTarget(
     const from = screen.cursor.page_pin.*;
     const bounds = screen.inputBounds(from) orelse return null;
     if (!bounds.contains(screen, to)) return null;
-    if (from.eql(to)) return null;
+    const clamped = clampInputPinRow(screen, bounds, to);
+    if (from.eql(clamped)) return null;
 
-    return to;
+    return clamped;
+}
+
+fn inputShiftClickSelection(
+    t: *terminal.Terminal,
+    click: terminal.Pin,
+    existing: ?terminal.Selection,
+    enabled: bool,
+    readonly: bool,
+    preedit_active: bool,
+) ?terminal.Selection {
+    const screen = t.screens.active;
+    const cursor = screen.cursor.page_pin.*;
+    const bounds = inputSelectionBounds(screen, cursor) orelse return null;
+    var target = click;
+    if (!bounds.contains(screen, click)) {
+        target = if (click.before(bounds.start()))
+            bounds.start()
+        else
+            bounds.end();
+    }
+
+    var anchor = cursor;
+    if (existing) |sel| {
+        if (!selectionEligibleForEdit(t, sel, enabled, readonly, preedit_active)) return null;
+        if (cursor.eql(sel.end())) anchor = sel.start();
+    }
+
+    target = clampInputPinRow(screen, bounds, target);
+    const sel = terminal.Selection.init(anchor, target, false);
+    if (!selectionEligibleForEdit(t, sel, enabled, readonly, preedit_active)) return null;
+    return sel;
 }
 
 fn clickMoveCursorInput(self: *Surface, to: terminal.Pin) !void {
@@ -7212,6 +7582,7 @@ test "Surface: prompt input selection adjusts by character" {
 
     surface.io.terminal.flags.semantic_prompt_seen = true;
     surface.io.terminal.flags.shell_redraws_prompt = true;
+    try surface.io.terminal.screens.active.testWriteString("  ab\ncd");
     surface.io.terminal.screens.active.cursorAbsolute(2, 0);
 
     const row0 = surface.io.terminal.screens.active.pages.pin(.{ .active = .{ .x = 0, .y = 0 } }).?.rowAndCell().row;
@@ -7259,13 +7630,17 @@ test "Surface: prompt input selection adjusts by character" {
         PromptSelectionResult.handled_changed,
         try surface.adjustPromptInputSelection(.left),
     );
+    const sel_left_row1 = surface.io.terminal.screens.active.selection.?;
+    try testing.expectEqual(@as(usize, 1), sel_left_row1.end().x);
+    try testing.expectEqual(@as(usize, 1), sel_left_row1.end().y);
+
     try testing.expectEqual(
         PromptSelectionResult.handled_changed,
-        try surface.adjustPromptInputSelection(.left),
+        try surface.adjustPromptInputSelection(.down),
     );
-    const sel_left_row1 = surface.io.terminal.screens.active.selection.?;
-    try testing.expectEqual(@as(usize, 0), sel_left_row1.end().x);
-    try testing.expectEqual(@as(usize, 1), sel_left_row1.end().y);
+    const sel_down_end = surface.io.terminal.screens.active.selection.?;
+    try testing.expectEqual(@as(usize, 2), sel_down_end.end().x);
+    try testing.expectEqual(@as(usize, 1), sel_down_end.end().y);
 
     try testing.expectEqual(
         PromptSelectionResult.handled_changed,
@@ -7274,6 +7649,214 @@ test "Surface: prompt input selection adjusts by character" {
     const sel_up_clamped = surface.io.terminal.screens.active.selection.?;
     try testing.expectEqual(@as(usize, 2), sel_up_clamped.end().x);
     try testing.expectEqual(@as(usize, 0), sel_up_clamped.end().y);
+}
+
+test "Surface: prompt input selection clamps to input end" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var mutex = std.Thread.Mutex{};
+    var mailbox = try termio.Mailbox.initSPSC(alloc);
+    defer mailbox.deinit(alloc);
+
+    var surface: Surface = undefined;
+    surface.io.terminal = try terminal.Terminal.init(alloc, .{ .cols = 6, .rows = 3 });
+    defer surface.io.terminal.deinit(alloc);
+    surface.io.mailbox = mailbox;
+    surface.renderer_state = .{
+        .mutex = &mutex,
+        .terminal = &surface.io.terminal,
+        .inspector = null,
+        .preedit = null,
+        .mouse = .{},
+    };
+    surface.io.renderer_state = &surface.renderer_state;
+    surface.readonly = false;
+    surface.edit_selection_active = false;
+    surface.config = undefined;
+    surface.config.inplace_command_editing = true;
+    surface.config.copy_on_select = .false;
+
+    surface.io.terminal.flags.semantic_prompt_seen = true;
+    surface.io.terminal.flags.shell_redraws_prompt = true;
+    try surface.io.terminal.screens.active.testWriteString("AB\nC");
+    surface.io.terminal.screens.active.cursorAbsolute(0, 0);
+
+    const row0 = surface.io.terminal.screens.active.pages.pin(.{ .active = .{ .x = 0, .y = 0 } }).?.rowAndCell().row;
+    row0.semantic_prompt = .input;
+    row0.setInputStartCol(0);
+
+    const row1 = surface.io.terminal.screens.active.pages.pin(.{ .active = .{ .x = 0, .y = 1 } }).?.rowAndCell().row;
+    row1.semantic_prompt = .input;
+    row1.setInputStartCol(0);
+
+    const row2 = surface.io.terminal.screens.active.pages.pin(.{ .active = .{ .x = 0, .y = 2 } }).?.rowAndCell().row;
+    row2.semantic_prompt = .input;
+    row2.setInputStartCol(0);
+
+    surface.renderer_state.mutex.lock();
+    defer surface.renderer_state.mutex.unlock();
+
+    try testing.expectEqual(
+        PromptSelectionResult.handled_changed,
+        try surface.adjustPromptInputSelection(.down),
+    );
+    const sel_down = surface.io.terminal.screens.active.selection.?;
+    try testing.expectEqual(@as(usize, 0), sel_down.end().x);
+    try testing.expectEqual(@as(usize, 1), sel_down.end().y);
+
+    try testing.expectEqual(
+        PromptSelectionResult.handled_changed,
+        try surface.adjustPromptInputSelection(.down),
+    );
+    const sel_clamped = surface.io.terminal.screens.active.selection.?;
+    try testing.expectEqual(@as(usize, 0), sel_clamped.end().x);
+    try testing.expectEqual(@as(usize, 2), sel_clamped.end().y);
+}
+
+test "Surface: prompt input selection up from insertion keeps column" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var mutex = std.Thread.Mutex{};
+    var mailbox = try termio.Mailbox.initSPSC(alloc);
+    defer mailbox.deinit(alloc);
+
+    var surface: Surface = undefined;
+    surface.io.terminal = try terminal.Terminal.init(alloc, .{ .cols = 6, .rows = 2 });
+    defer surface.io.terminal.deinit(alloc);
+    surface.io.mailbox = mailbox;
+    surface.renderer_state = .{
+        .mutex = &mutex,
+        .terminal = &surface.io.terminal,
+        .inspector = null,
+        .preedit = null,
+        .mouse = .{},
+    };
+    surface.io.renderer_state = &surface.renderer_state;
+    surface.readonly = false;
+    surface.edit_selection_active = false;
+    surface.config = undefined;
+    surface.config.inplace_command_editing = true;
+    surface.config.copy_on_select = .false;
+
+    surface.io.terminal.flags.semantic_prompt_seen = true;
+    surface.io.terminal.flags.shell_redraws_prompt = true;
+    try surface.io.terminal.screens.active.testWriteString("abcd\nxy");
+    surface.io.terminal.screens.active.cursorAbsolute(2, 1);
+
+    const row0 = surface.io.terminal.screens.active.pages.pin(.{ .active = .{ .x = 0, .y = 0 } }).?.rowAndCell().row;
+    row0.semantic_prompt = .input;
+    row0.setInputStartCol(0);
+
+    const row1 = surface.io.terminal.screens.active.pages.pin(.{ .active = .{ .x = 0, .y = 1 } }).?.rowAndCell().row;
+    row1.semantic_prompt = .input;
+    row1.setInputStartCol(0);
+
+    surface.renderer_state.mutex.lock();
+    defer surface.renderer_state.mutex.unlock();
+
+    try testing.expectEqual(
+        PromptSelectionResult.handled_changed,
+        try surface.adjustPromptInputSelection(.up),
+    );
+    const sel_up = surface.io.terminal.screens.active.selection.?;
+    try testing.expectEqual(@as(usize, 2), sel_up.end().x);
+    try testing.expectEqual(@as(usize, 0), sel_up.end().y);
+}
+
+test "Surface: inputMoveCount counts empty endpoints" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var t = try terminal.Terminal.init(alloc, .{ .cols = 6, .rows = 2 });
+    defer t.deinit(alloc);
+
+    const screen = t.screens.active;
+    try screen.testWriteString("abc");
+
+    const row0 = screen.pages.pin(.{ .active = .{ .x = 0, .y = 0 } }).?.rowAndCell().row;
+    row0.semantic_prompt = .input;
+    row0.setInputStartCol(0);
+
+    const from_text = screen.pages.pin(.{ .active = .{ .x = 0, .y = 0 } }).?;
+    const to_empty = screen.pages.pin(.{ .active = .{ .x = 3, .y = 0 } }).?;
+    try testing.expectEqual(@as(usize, 3), inputMoveCount(screen, from_text, to_empty));
+
+    const from_empty = to_empty;
+    const to_text = screen.pages.pin(.{ .active = .{ .x = 1, .y = 0 } }).?;
+    try testing.expectEqual(@as(usize, 2), inputMoveCount(screen, from_empty, to_text));
+}
+
+test "Surface: inputSelectionCharacterCount is half-open" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var t = try terminal.Terminal.init(alloc, .{ .cols = 6, .rows = 1 });
+    defer t.deinit(alloc);
+
+    try t.screens.active.testWriteString("abc");
+    t.screens.active.cursorAbsolute(0, 0);
+
+    const row = t.screens.active.pages.pin(.{ .active = .{ .x = 0, .y = 0 } }).?.rowAndCell().row;
+    row.semantic_prompt = .input;
+    row.setInputStartCol(0);
+
+    const sel = terminal.Selection.init(
+        t.screens.active.pages.pin(.{ .active = .{ .x = 1, .y = 0 } }).?,
+        t.screens.active.pages.pin(.{ .active = .{ .x = 2, .y = 0 } }).?,
+        false,
+    );
+    try testing.expectEqual(@as(usize, 1), inputSelectionCharacterCount(t.screens.active, sel));
+}
+
+test "Surface: inputMoveCount treats hard newline as single move" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var t = try terminal.Terminal.init(alloc, .{ .cols = 6, .rows = 3 });
+    defer t.deinit(alloc);
+
+    const screen = t.screens.active;
+    try screen.testWriteString("ab\ncd");
+
+    const row0 = screen.pages.pin(.{ .active = .{ .x = 0, .y = 0 } }).?.rowAndCell().row;
+    row0.semantic_prompt = .input;
+    row0.setInputStartCol(0);
+
+    const row1 = screen.pages.pin(.{ .active = .{ .x = 0, .y = 1 } }).?.rowAndCell().row;
+    row1.semantic_prompt = .input;
+    row1.setInputStartCol(0);
+
+    const from_end = screen.pages.pin(.{ .active = .{ .x = 2, .y = 0 } }).?;
+    const to_start = screen.pages.pin(.{ .active = .{ .x = 0, .y = 1 } }).?;
+    try testing.expectEqual(@as(usize, 1), inputMoveCount(screen, from_end, to_start));
+}
+
+test "Surface: inputEndPin returns insertion point" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var t = try terminal.Terminal.init(alloc, .{ .cols = 6, .rows = 2 });
+    defer t.deinit(alloc);
+
+    const screen = t.screens.active;
+    try screen.testWriteString("ab\nc");
+
+    const row0 = screen.pages.pin(.{ .active = .{ .x = 0, .y = 0 } }).?.rowAndCell().row;
+    row0.semantic_prompt = .input;
+    row0.setInputStartCol(0);
+
+    const row1 = screen.pages.pin(.{ .active = .{ .x = 0, .y = 1 } }).?.rowAndCell().row;
+    row1.semantic_prompt = .input;
+    row1.setInputStartCol(0);
+
+    const bounds = screen.inputBounds(screen.pages.pin(.{ .active = .{ .x = 0, .y = 0 } }).?).?;
+    const end_pin = inputEndPin(screen, bounds);
+    try testing.expectEqual(terminal.point.Point{ .screen = .{
+        .x = 1,
+        .y = 1,
+    } }, screen.pages.pointFromPin(.screen, end_pin).?);
 }
 
 test "Surface: arrowSequence respects cursor_keys" {
@@ -7326,4 +7909,63 @@ test "Surface: inputClickMoveTarget gating" {
     t.flags.shell_redraws_prompt = true;
     row.semantic_prompt = .command;
     try testing.expect(inputClickMoveTarget(&t, to_inside) == null);
+}
+
+test "Surface: inputShiftClickSelection anchors at cursor" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var t = try terminal.Terminal.init(alloc, .{ .cols = 6, .rows = 2 });
+    defer t.deinit(alloc);
+
+    t.flags.semantic_prompt_seen = true;
+
+    const screen = t.screens.active;
+    try screen.testWriteString("abcd");
+    screen.cursorAbsolute(1, 0);
+
+    const row = screen.pages.pin(.{ .active = .{ .x = 0, .y = 0 } }).?.rowAndCell().row;
+    row.semantic_prompt = .input;
+    row.setInputStartCol(0);
+
+    const click_pin = screen.pages.pin(.{ .active = .{ .x = 3, .y = 0 } }).?;
+    const sel = inputShiftClickSelection(
+        &t,
+        click_pin,
+        null,
+        true,
+        false,
+        false,
+    ) orelse return error.TestExpectedResult;
+    try testing.expectEqual(@as(usize, 1), sel.start().x);
+    try testing.expectEqual(@as(usize, 3), sel.end().x);
+
+    const existing = terminal.Selection.init(
+        screen.pages.pin(.{ .active = .{ .x = 1, .y = 0 } }).?,
+        screen.pages.pin(.{ .active = .{ .x = 2, .y = 0 } }).?,
+        false,
+    );
+    screen.cursorAbsolute(2, 0);
+    const sel_extend = inputShiftClickSelection(
+        &t,
+        click_pin,
+        existing,
+        true,
+        false,
+        false,
+    ) orelse return error.TestExpectedResult;
+    try testing.expectEqual(@as(usize, 1), sel_extend.start().x);
+    try testing.expectEqual(@as(usize, 3), sel_extend.end().x);
+
+    const outside_pin = screen.pages.pin(.{ .active = .{ .x = 5, .y = 0 } }).?;
+    const sel_clamped = inputShiftClickSelection(
+        &t,
+        outside_pin,
+        null,
+        true,
+        false,
+        false,
+    ) orelse return error.TestExpectedResult;
+    try testing.expectEqual(@as(usize, 2), sel_clamped.start().x);
+    try testing.expectEqual(@as(usize, 4), sel_clamped.end().x);
 }

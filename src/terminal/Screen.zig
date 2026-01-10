@@ -53,6 +53,10 @@ saved_cursor: ?SavedCursor = null,
 /// automatically setup tracking.
 selection: ?Selection = null,
 
+/// True when the current selection is an in-place edit selection within
+/// the prompt input area. This is used for selection rendering.
+selection_is_edit: bool = false,
+
 /// The charset state
 charset: CharsetState = .{},
 
@@ -529,6 +533,7 @@ pub fn clonePool(
         .no_scrollback = self.no_scrollback,
         .cursor = cursor,
         .selection = sel,
+        .selection_is_edit = self.selection_is_edit,
         .dirty = self.dirty,
     };
     result.assertIntegrity();
@@ -2231,6 +2236,7 @@ pub fn select(self: *Screen, sel_: ?Selection) !void {
     // Untrack prior selection
     if (self.selection) |*old| old.deinit(self);
     self.selection = tracked_sel;
+    self.selection_is_edit = false;
     self.dirty.selection = true;
 }
 
@@ -2241,6 +2247,7 @@ pub fn clearSelection(self: *Screen) void {
         self.dirty.selection = true;
     }
     self.selection = null;
+    self.selection_is_edit = false;
 }
 
 pub const SelectionString = struct {
@@ -2830,6 +2837,61 @@ pub fn inputBounds(self: *Screen, pin: Pin) ?Selection {
     }
 
     return null;
+}
+
+/// Returns the input row bounds (start/end) for the given row pin within
+/// the input bounds selection.
+pub fn inputRowBounds(
+    self: *const Screen,
+    bounds: Selection,
+    row_pin: Pin,
+) ?struct { start: size.CellCountInt, end: size.CellCountInt } {
+    const ordered = bounds.ordered(self, .forward);
+    const bounds_start = ordered.start();
+    const bounds_end = ordered.end();
+
+    const row = row_pin.rowAndCell().row;
+    var row_start: usize = if (row.inputStartCol()) |col| col else 0;
+    if (row_pin.node == bounds_start.node and row_pin.y == bounds_start.y) {
+        row_start = @max(row_start, @as(usize, @intCast(bounds_start.x)));
+    }
+
+    var row_limit: usize = @as(usize, @intCast(self.pages.cols - 1));
+    if (row_pin.node == bounds_end.node and row_pin.y == bounds_end.y) {
+        row_limit = @as(usize, @intCast(bounds_end.x));
+    }
+    if (row_start > row_limit) {
+        const start_u16: size.CellCountInt = @intCast(row_start);
+        return .{ .start = start_u16, .end = start_u16 };
+    }
+
+    const cells = row_pin.node.data.getCells(row);
+    var x = row_limit;
+    while (true) {
+        if (cells[x].hasText()) break;
+        if (x == row_start) {
+            const start_u16: size.CellCountInt = @intCast(row_start);
+            return .{ .start = start_u16, .end = start_u16 };
+        }
+        x -= 1;
+    }
+
+    const last_text = x;
+    var row_end: usize = last_text;
+    if (!row.wrap and last_text != row_limit) {
+        var probe = last_text + 1;
+        while (probe <= row_limit) : (probe += 1) {
+            const cell = cells[probe];
+            if (cell.wide == .spacer_tail or cell.wide == .spacer_head) continue;
+            row_end = probe;
+            break;
+        }
+    }
+
+    return .{
+        .start = @intCast(row_start),
+        .end = @intCast(row_end),
+    };
 }
 
 pub const LineIterator = struct {
@@ -8364,6 +8426,40 @@ test "Screen: inputBounds multiline prompt" {
         .x = 9,
         .y = 3,
     } }, s.pages.pointFromPin(.screen, sel.end()).?);
+}
+
+test "Screen: inputRowBounds clamps to input text" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(alloc, .{ .cols = 10, .rows = 5, .max_scrollback = 0 });
+    defer s.deinit();
+
+    try s.testWriteSemanticString("$ ", .prompt);
+    try s.testWriteSemanticString("ab\n", .input);
+    try s.testWriteSemanticString("\n", .input);
+    try s.testWriteSemanticString("cd", .input);
+
+    s.pages.pin(.{ .active = .{ .x = 0, .y = 0 } }).?.rowAndCell().row.setInputStartCol(2);
+    s.pages.pin(.{ .active = .{ .x = 0, .y = 1 } }).?.rowAndCell().row.setInputStartCol(0);
+    s.pages.pin(.{ .active = .{ .x = 0, .y = 2 } }).?.rowAndCell().row.setInputStartCol(0);
+
+    const bounds = s.inputBounds(s.pages.pin(.{ .active = .{ .x = 3, .y = 0 } }).?).?;
+
+    const row0_pin = s.pages.pin(.{ .active = .{ .x = 2, .y = 0 } }).?;
+    const row0 = s.inputRowBounds(bounds, row0_pin) orelse return error.TestExpectedResult;
+    try testing.expectEqual(@as(size.CellCountInt, 2), row0.start);
+    try testing.expectEqual(@as(size.CellCountInt, 4), row0.end);
+
+    const row1_pin = s.pages.pin(.{ .active = .{ .x = 0, .y = 1 } }).?;
+    const row1 = s.inputRowBounds(bounds, row1_pin) orelse return error.TestExpectedResult;
+    try testing.expectEqual(@as(size.CellCountInt, 0), row1.start);
+    try testing.expectEqual(@as(size.CellCountInt, 0), row1.end);
+
+    const row2_pin = s.pages.pin(.{ .active = .{ .x = 0, .y = 2 } }).?;
+    const row2 = s.inputRowBounds(bounds, row2_pin) orelse return error.TestExpectedResult;
+    try testing.expectEqual(@as(size.CellCountInt, 0), row2.start);
+    try testing.expectEqual(@as(size.CellCountInt, 2), row2.end);
 }
 
 test "Screen: inputBounds outside prompt returns null" {

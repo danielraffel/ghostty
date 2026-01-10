@@ -599,6 +599,10 @@ pub const RenderState = struct {
             // least we can cache it.
             const tl = s.pages.pointFromPin(.screen, cache.tl_pin).?.screen;
             const br = s.pages.pointFromPin(.screen, cache.br_pin).?.screen;
+            const input_bounds = if (s.selection_is_edit)
+                s.inputBounds(cache.tl_pin)
+            else
+                null;
 
             // We need to determine if our selection is within the viewport.
             // The viewport is generally very small so the efficient way to
@@ -618,11 +622,26 @@ pub const RenderState = struct {
                     br,
                     p,
                 ) orelse continue;
-                const start = row_sel.start();
-                const end = row_sel.end();
+                var start = row_sel.start();
+                var end = row_sel.end();
                 assert(start.node == end.node);
                 assert(start.x <= end.x);
                 assert(start.y == end.y);
+                if (input_bounds) |bounds| {
+                    if (s.inputRowBounds(bounds, pin)) |row_bounds| {
+                        if (start.x < row_bounds.start) start.x = row_bounds.start;
+                        if (end.x > row_bounds.end) end.x = row_bounds.end;
+                        if (start.x > end.x) continue;
+                    }
+                }
+                if (s.selection_is_edit and
+                    pin.node == cache.br_pin.node and
+                    pin.y == cache.br_pin.y)
+                {
+                    if (end.x <= start.x) continue;
+                    end.x -= 1;
+                    if (end.x < start.x) continue;
+                }
                 sel_bounds.* = .{ start.x, end.x };
             }
         }
