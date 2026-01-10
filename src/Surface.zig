@@ -2653,6 +2653,7 @@ fn stepInputPin(
     bounds: terminal.Selection,
     from: terminal.Pin,
     direction: input.Binding.Action.AdjustSelection,
+    goal_x: ?terminal.size.CellCountInt,
 ) terminal.Pin {
     var move_from = from;
     if (direction == .up or direction == .down) {
@@ -2689,6 +2690,13 @@ fn stepInputPin(
             (clamped.node != next.node or clamped.y != next.y))
         {
             return from;
+        }
+        // For vertical movement, use goal_x to preserve the original column
+        // across multiple up/down steps, clamped to the target row's bounds.
+        if ((direction == .up or direction == .down) and goal_x != null) {
+            var result = clamped;
+            result.x = goal_x.?;
+            return clampInputPinRow(screen, bounds, result);
         }
         return clampInputPinRow(screen, bounds, clamped);
     }
@@ -2733,6 +2741,7 @@ fn adjustPromptInputSelection(
 
     var sel_ptr: ?*terminal.Selection = null;
     var sel_end = cursor;
+    var goal_x: ?terminal.size.CellCountInt = null;
     if (screen.selection) |*sel| {
         if (!selectionEligibleForEdit(
             t,
@@ -2746,6 +2755,8 @@ fn adjustPromptInputSelection(
 
         sel_ptr = sel;
         sel_end = sel.end();
+        // Use the anchor's column as the goal for vertical movement
+        goal_x = sel.start().x;
     } else {
         const candidate = terminal.Selection.init(cursor, cursor, false);
         if (!selectionEligibleForEdit(
@@ -2757,9 +2768,11 @@ fn adjustPromptInputSelection(
         )) {
             return .not_handled;
         }
+        // When starting a new selection, use cursor column as goal
+        goal_x = cursor.x;
     }
 
-    const next = stepInputPin(screen, bounds, sel_end, direction);
+    const next = stepInputPin(screen, bounds, sel_end, direction, goal_x);
     if (next.eql(sel_end)) return .handled_no_change;
 
     if (sel_ptr) |sel| {
@@ -5011,7 +5024,7 @@ fn inputClickMoveTarget(
 
     const screen = t.screens.active;
     const from = screen.cursor.page_pin.*;
-    const bounds = screen.inputBounds(from) orelse return null;
+    const bounds = inputSelectionBounds(screen, from) orelse return null;
     if (!bounds.contains(screen, to)) return null;
     const clamped = clampInputPinRow(screen, bounds, to);
     if (from.eql(clamped)) return null;
