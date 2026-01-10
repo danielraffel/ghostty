@@ -825,6 +825,7 @@ pub fn linefeed(self: *Terminal) !void {
     try self.index();
     if (self.modes.get(.linefeed)) self.carriageReturn();
     if (old_prompt == .input) {
+        self.screens.active.cursor.page_row.semantic_prompt = .input;
         self.screens.active.cursor.page_row.setInputStartCol(0);
     }
 }
@@ -11089,6 +11090,7 @@ test "Terminal: input_start_col propagates on linefeed" {
     t.markSemanticPrompt(.input);
     try t.linefeed();
     try testing.expectEqual(@as(?u16, 0), t.screens.active.cursor.page_row.inputStartCol());
+    try testing.expectEqual(@as(Row.SemanticPrompt, .input), t.screens.active.cursor.page_row.semantic_prompt);
 }
 
 test "Terminal: input_start_col propagates on wrap" {
