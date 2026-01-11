@@ -2497,8 +2497,14 @@ fn inputCursorIndex(
         if (is_pin_row) break;
         if (!row.wrap) index += 1;
 
+        // If we're already on the end row, don't try to go further
+        if (row_pin.node == end.node and row_pin.y == end.y) break;
+
         const next = row_pin.down(1) orelse break;
-        if (end.before(next)) break;
+        // Only break if next is strictly AFTER end (past the end row entirely)
+        // We must continue if next is ON the end row so we can count its characters
+        if (next.y > end.y and next.node == end.node) break;
+        if (next.node != end.node and end.before(next)) break;
         row_pin = next;
     }
 
@@ -4412,8 +4418,6 @@ pub fn mouseButtonCallback(
     crash.sentry.thread_state = self.crashThreadState();
     defer crash.sentry.thread_state = null;
 
-    // log.debug("mouse action={} button={} mods={}", .{ action, button, mods });
-
     // If we have an inspector, we always queue a render
     if (self.inspector) |insp| {
         defer self.queueRender() catch {};
@@ -4578,6 +4582,41 @@ pub fn mouseButtonCallback(
         }
     }
 
+    const alt_click_move = mods.alt and self.config.cursor_click_to_move;
+    const plain_click_move = self.config.cursor_click_to_move_input and
+        mods.withoutLocks().empty();
+
+    // For left button click release we check if we are moving our cursor.
+    // This is checked BEFORE mouse reporting so that click-to-move-input
+    // works even when the shell has mouse reporting enabled.
+    if (button == .left and
+        action == .release and
+        (alt_click_move or plain_click_move))
+    click_move: {
+        self.renderer_state.mutex.lock();
+        defer self.renderer_state.mutex.unlock();
+
+        // If we have a selection then we do not do click to move because
+        // it means that we moved our cursor while pressing the mouse button.
+        if (self.io.terminal.screens.active.selection != null) break :click_move;
+
+        if (plain_click_move and self.mouse.left_click_count != 1) break :click_move;
+
+        const pin = self.mouse.left_click_pin orelse break :click_move;
+        if (alt_click_move) {
+            // Moving always resets the click count so that we don't highlight.
+            self.mouse.left_click_count = 0;
+            try self.clickMoveCursor(pin.*);
+        } else {
+            // For plain click-to-move-input, check if target is in input bounds.
+            // If not in input bounds, fall through to mouse reporting.
+            if (inputClickMoveTarget(&self.io.terminal, pin.*) == null) break :click_move;
+            // Preserve the click count so a second click can select a word.
+            try self.clickMoveCursorInput(pin.*);
+        }
+        return true;
+    }
+
     // Report mouse events if enabled
     {
         self.renderer_state.mutex.lock();
@@ -4615,36 +4654,6 @@ pub fn mouseButtonCallback(
             // selection or highlighting.
             return true;
         }
-    }
-
-    const alt_click_move = mods.alt and self.config.cursor_click_to_move;
-    const plain_click_move = self.config.cursor_click_to_move_input and
-        mods.withoutLocks().empty();
-
-    // For left button click release we check if we are moving our cursor.
-    if (button == .left and
-        action == .release and
-        (alt_click_move or plain_click_move))
-    click_move: {
-        self.renderer_state.mutex.lock();
-        defer self.renderer_state.mutex.unlock();
-
-        // If we have a selection then we do not do click to move because
-        // it means that we moved our cursor while pressing the mouse button.
-        if (self.io.terminal.screens.active.selection != null) break :click_move;
-
-        if (plain_click_move and self.mouse.left_click_count != 1) break :click_move;
-
-        const pin = self.mouse.left_click_pin orelse break :click_move;
-        if (alt_click_move) {
-            // Moving always resets the click count so that we don't highlight.
-            self.mouse.left_click_count = 0;
-            try self.clickMoveCursor(pin.*);
-        } else {
-            // Preserve the click count so a second click can select a word.
-            try self.clickMoveCursorInput(pin.*);
-        }
-        return true;
     }
 
     // For left button clicks we always record some information for
@@ -5018,13 +5027,25 @@ fn inputClickMoveTarget(
     t: *terminal.Terminal,
     to: terminal.Pin,
 ) ?terminal.Pin {
-    if (t.screens.active_key != .primary) return null;
-    if (!t.flags.shell_redraws_prompt) return null;
-    if (!t.cursorIsAtPrompt()) return null;
+    if (t.screens.active_key != .primary) {
+        log.debug("inputClickMoveTarget: not primary screen", .{});
+        return null;
+    }
+    if (!t.flags.shell_redraws_prompt) {
+        log.debug("inputClickMoveTarget: shell_redraws_prompt is false", .{});
+        return null;
+    }
+    if (!t.cursorIsAtPrompt()) {
+        log.debug("inputClickMoveTarget: cursor not at prompt", .{});
+        return null;
+    }
 
     const screen = t.screens.active;
     const from = screen.cursor.page_pin.*;
-    const bounds = inputSelectionBounds(screen, from) orelse return null;
+    const bounds = inputSelectionBounds(screen, from) orelse {
+        log.debug("inputClickMoveTarget: inputSelectionBounds returned null", .{});
+        return null;
+    };
 
     // Check if click row is within input bounds. We check rows only (not columns)
     // because clicking past end-of-line should snap to that row's input end,
@@ -5032,14 +5053,27 @@ fn inputClickMoveTarget(
     const ordered = bounds.ordered(screen, .forward);
     const start_row = ordered.start();
     const end_row = ordered.end();
+
+    // DEBUG logging
+    log.debug("inputClickMoveTarget: to=({},{}) from=({},{}) bounds_start=({},{}) bounds_end=({},{})", .{
+        to.x, to.y, from.x, from.y, start_row.x, start_row.y, end_row.x, end_row.y,
+    });
+
     const to_before_start = to.before(start_row) and
         (to.node != start_row.node or to.y != start_row.y);
     const to_after_end = end_row.before(to) and
         (to.node != end_row.node or to.y != end_row.y);
-    if (to_before_start or to_after_end) return null;
+    if (to_before_start or to_after_end) {
+        log.debug("inputClickMoveTarget: click outside bounds (before={} after={})", .{ to_before_start, to_after_end });
+        return null;
+    }
 
     const clamped = clampInputPinRow(screen, bounds, to);
-    if (from.eql(clamped)) return null;
+    log.debug("inputClickMoveTarget: clamped=({},{})", .{ clamped.x, clamped.y });
+    if (from.eql(clamped)) {
+        log.debug("inputClickMoveTarget: clamped equals from, no move needed", .{});
+        return null;
+    }
 
     return clamped;
 }
