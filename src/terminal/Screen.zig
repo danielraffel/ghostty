@@ -2583,6 +2583,8 @@ pub fn selectWord(self: *Screen, pin: Pin) ?Selection {
         '<',
         '>',
         '$',
+        '/',
+        '\\',
     };
 
     // If our cell is empty we can't select a word, because we can't select

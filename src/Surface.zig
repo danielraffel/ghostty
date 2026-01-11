@@ -2743,7 +2743,19 @@ fn adjustPromptInputSelection(
 
     const screen = t.screens.active;
     const cursor = screen.cursor.page_pin.*;
-    const bounds = inputSelectionBounds(screen, cursor) orelse return .not_handled;
+
+    // Calculate bounds. If there's an existing selection that extends beyond
+    // the cursor, we need to use the selection's furthest point for bounds
+    // calculation to ensure we include all rows that were previously selected.
+    var bounds_pin = cursor;
+    if (screen.selection) |sel| {
+        // Use bottomRight to get the visually furthest point in the selection
+        const sel_br = sel.bottomRight(screen);
+        if (bounds_pin.before(sel_br)) {
+            bounds_pin = sel_br;
+        }
+    }
+    const bounds = inputSelectionBounds(screen, bounds_pin) orelse return .not_handled;
 
     var sel_ptr: ?*terminal.Selection = null;
     var sel_end = cursor;
@@ -4601,11 +4613,23 @@ pub fn mouseButtonCallback(
         self.renderer_state.mutex.lock();
         defer self.renderer_state.mutex.unlock();
 
+        // For double/triple clicks, break out early to preserve word/line selection
+        if (plain_click_move and self.mouse.left_click_count != 1) break :click_move;
+
         // If we have a selection then we do not do click to move because
         // it means that we moved our cursor while pressing the mouse button.
-        if (self.io.terminal.screens.active.selection != null) break :click_move;
-
-        if (plain_click_move and self.mouse.left_click_count != 1) break :click_move;
+        // Exception: edit selections (from paste/shift-select) should be
+        // cleared and then we proceed with click-to-move.
+        var cleared_edit_selection = false;
+        if (self.io.terminal.screens.active.selection != null) {
+            if (self.edit_selection_active and plain_click_move) {
+                try self.setSelection(null);
+                cleared_edit_selection = true;
+                // Continue with click-to-move logic below
+            } else {
+                break :click_move;
+            }
+        }
 
         const pin = self.mouse.left_click_pin orelse break :click_move;
         if (alt_click_move) {
@@ -4613,11 +4637,18 @@ pub fn mouseButtonCallback(
             self.mouse.left_click_count = 0;
             try self.clickMoveCursor(pin.*);
         } else {
-            // For plain click-to-move-input, check if target is in input bounds.
-            // If not in input bounds, fall through to mouse reporting.
-            if (inputClickMoveTarget(&self.io.terminal, pin.*) == null) break :click_move;
+            // For plain click-to-move-input, move cursor to clicked position.
+            // Clicking outside/below input snaps to input end.
+            // Clicking before input falls through to mouse reporting.
+            const target = inputClickMoveTargetOrEnd(&self.io.terminal, pin.*);
+            if (target == null) {
+                // If we cleared an edit selection, we handled the click even if
+                // no cursor movement was needed (cursor already at target).
+                if (cleared_edit_selection) return true;
+                break :click_move;
+            }
             // Preserve the click count so a second click can select a word.
-            try self.clickMoveCursorInput(pin.*);
+            try self.clickMoveCursorInputOrEnd(pin.*);
         }
         return true;
     }
@@ -4745,26 +4776,40 @@ pub fn mouseButtonCallback(
             1 => {
                 // If we have a selection, clear it. This always happens.
                 if (self.io.terminal.screens.active.selection != null) {
-                    try self.io.terminal.screens.active.select(null);
-                    self.edit_selection_active = false;
-                    try self.queueRender();
+                    try self.setSelection(null);
                 }
             },
 
             // Double click, select the word under our mouse.
-            // First try to detect if we're clicking on a URL to select the entire URL.
+            // First try to detect if we're clicking on a URL to select the entire URL,
+            // but only if clicking on a non-word character (like the start of a URL).
             2 => {
                 const sel_ = sel: {
-                    // Try link detection without requiring modifier keys
-                    if (self.linkAtPin(
-                        pin.*,
-                        null,
-                    )) |result_| {
-                        if (result_) |result| {
-                            break :sel result.selection;
+                    // Check if the character at the click position is a word character.
+                    // If it is, skip link detection and use word selection directly.
+                    // This prevents URL/path regexes from overriding word selection
+                    // when clicking on regular text like "click" in "/triple click".
+                    const rac = pin.rowAndCell();
+                    const codepoint = rac.cell.content.codepoint;
+                    const boundary = &[_]u32{
+                        0, ' ', '\t', '\'', '"', '│', '`', '|', ':', ';', ',',
+                        '(', ')', '[', ']', '{', '}', '<', '>', '$', '/', '\\',
+                    };
+                    const is_boundary = std.mem.indexOfAny(u32, boundary, &[_]u32{codepoint}) != null;
+
+                    // Only try link detection if clicking on a boundary character
+                    // (like "/" at the start of a path or ":" in "https:")
+                    if (is_boundary) {
+                        if (self.linkAtPin(
+                            pin.*,
+                            null,
+                        )) |result_| {
+                            if (result_) |result| {
+                                break :sel result.selection;
+                            }
+                        } else |_| {
+                            // Ignore any errors, likely regex errors.
                         }
-                    } else |_| {
-                        // Ignore any errors, likely regex errors.
                     }
 
                     break :sel self.io.terminal.screens.active.selectWord(pin.*);
@@ -5083,6 +5128,44 @@ fn inputClickMoveTarget(
     return clamped;
 }
 
+/// Like inputClickMoveTarget, but when clicking past/below input bounds,
+/// returns the input end position instead of null.
+fn inputClickMoveTargetOrEnd(
+    t: *terminal.Terminal,
+    to: terminal.Pin,
+) ?terminal.Pin {
+    if (t.screens.active_key != .primary) return null;
+    if (!t.flags.shell_redraws_prompt) return null;
+    if (!t.cursorIsAtPrompt()) return null;
+
+    const screen = t.screens.active;
+    const from = screen.cursor.page_pin.*;
+    const bounds = inputSelectionBounds(screen, from) orelse return null;
+
+    const ordered = bounds.ordered(screen, .forward);
+    const start_row = ordered.start();
+    const input_end = inputEndPin(screen, bounds);
+
+    // If clicking before input start, not a valid target
+    const to_before_start = to.before(start_row) and
+        (to.node != start_row.node or to.y != start_row.y);
+    if (to_before_start) return null;
+
+    // If clicking past/after input end, snap to input end
+    // Check if click is on a later row, OR same row but after the end column
+    const to_after_end = (to.y > input_end.y) or
+        (to.y == input_end.y and to.node == input_end.node and to.x > input_end.x);
+    if (to_after_end) {
+        if (from.eql(input_end)) return null;
+        return input_end;
+    }
+
+    // Within bounds - clamp to valid position
+    const clamped = clampInputPinRow(screen, bounds, to);
+    if (from.eql(clamped)) return null;
+    return clamped;
+}
+
 fn inputShiftClickSelection(
     t: *terminal.Terminal,
     click: terminal.Pin,
@@ -5120,6 +5203,29 @@ fn clickMoveCursorInput(self: *Surface, to: terminal.Pin) !void {
     const screen = self.io.terminal.screens.active;
     const from = screen.cursor.page_pin.*;
     const bounds = inputSelectionBounds(screen, from) orelse return;
+    self.sendInputCursorMove(screen, bounds, from, target);
+}
+
+/// Like clickMoveCursorInput but also handles clicks outside/below input.
+fn clickMoveCursorInputOrEnd(self: *Surface, to: terminal.Pin) !void {
+    if (!self.config.cursor_click_to_move_input) return;
+    const target = inputClickMoveTargetOrEnd(&self.io.terminal, to) orelse return;
+    const screen = self.io.terminal.screens.active;
+    const from = screen.cursor.page_pin.*;
+    const bounds = inputSelectionBounds(screen, from) orelse return;
+
+    // Check if cursor is outside input bounds (e.g., on a blank line after input)
+    const ordered = bounds.ordered(screen, .forward);
+    const bounds_end = ordered.end();
+    const input_end = inputEndPin(screen, bounds);
+
+    // If cursor is past the input end row, send Ctrl+E to go to end of input
+    if (from.y > bounds_end.y or (from.y == bounds_end.y and from.x > input_end.x)) {
+        // Send Ctrl+E (end of line) to move cursor to end of input
+        self.queueIo(.{ .write_stable = "\x05" }, .locked);
+        return;
+    }
+
     self.sendInputCursorMove(screen, bounds, from, target);
 }
 
@@ -6926,7 +7032,10 @@ fn completeClipboardPaste(
         defer self.renderer_state.mutex.unlock();
 
         if (self.config.inplace_command_editing) {
-            _ = self.performEditReplacement();
+            if (self.performEditReplacement()) {
+                // Queue render to clear selection highlighting after replacement
+                try self.queueRender();
+            }
         }
 
         const opts: input.paste.Options = .fromTerminal(&self.io.terminal);

@@ -608,6 +608,13 @@ pub const RenderState = struct {
             // The viewport is generally very small so the efficient way to
             // do this is to traverse the viewport pages and check for the
             // matching selection pages.
+            //
+            // First, clear all row selections. This is necessary because the loop
+            // below only sets selection bounds for rows that are IN the selection,
+            // using 'continue' for rows not in the selection. Without clearing,
+            // rows that were previously selected but aren't anymore would keep
+            // their stale selection values.
+            @memset(row_sels, null);
             for (
                 row_pins,
                 row_sels,
@@ -644,6 +651,12 @@ pub const RenderState = struct {
                 }
                 sel_bounds.* = .{ start.x, end.x };
             }
+        } else {
+            // No selection - clear all row selection bounds to avoid stale highlighting.
+            // This is necessary because the selection block above is only entered when
+            // s.selection is non-null, leaving old selection values in row_sels.
+            @memset(row_sels, null);
+            self.selection_cache = null;
         }
 
         // Handle dirty state.
