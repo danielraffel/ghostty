@@ -57,6 +57,12 @@ selection: ?Selection = null,
 /// the prompt input area. This is used for selection rendering.
 selection_is_edit: bool = false,
 
+/// True when the edit selection should be rendered with end-exclusive bounds.
+/// This applies to shift-arrow and shift-click selections (where the end is
+/// an insertion point), but NOT to word/line selections from double/triple-click
+/// (where the end should include the full word/line).
+selection_end_exclusive: bool = false,
+
 /// The charset state
 charset: CharsetState = .{},
 
@@ -534,6 +540,7 @@ pub fn clonePool(
         .cursor = cursor,
         .selection = sel,
         .selection_is_edit = self.selection_is_edit,
+        .selection_end_exclusive = self.selection_end_exclusive,
         .dirty = self.dirty,
     };
     result.assertIntegrity();
@@ -2249,6 +2256,7 @@ pub fn select(self: *Screen, sel_: ?Selection) !void {
     if (self.selection) |*old| old.deinit(self);
     self.selection = tracked_sel;
     self.selection_is_edit = false;
+    self.selection_end_exclusive = false;
     self.dirty.selection = true;
 }
 
@@ -2260,6 +2268,7 @@ pub fn clearSelection(self: *Screen) void {
     }
     self.selection = null;
     self.selection_is_edit = false;
+    self.selection_end_exclusive = false;
 }
 
 pub const SelectionString = struct {

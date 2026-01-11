@@ -2788,6 +2788,9 @@ fn adjustPromptInputSelection(
         self.classifySelection();
     }
 
+    // Shift-arrow selections use end-exclusive bounds for rendering
+    screen.selection_end_exclusive = true;
+
     self.sendInputCursorMove(screen, bounds, sel_end, next);
     screen.dirty.selection = true;
     return .handled_changed;
@@ -4492,6 +4495,8 @@ pub fn mouseButtonCallback(
 
         try screen.select(sel);
         self.classifySelection();
+        // Shift-click selections use end-exclusive bounds for rendering
+        screen.selection_end_exclusive = true;
         const cursor = screen.cursor.page_pin.*;
         const bounds = inputSelectionBounds(screen, cursor) orelse break :prompt_shift_click;
         self.sendInputCursorMove(

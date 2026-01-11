@@ -634,7 +634,7 @@ pub const RenderState = struct {
                         if (start.x > end.x) continue;
                     }
                 }
-                if (s.selection_is_edit and
+                if (s.selection_end_exclusive and
                     pin.node == cache.br_pin.node and
                     pin.y == cache.br_pin.y)
                 {
