@@ -3223,13 +3223,22 @@ pub fn keyCallback(
         }
     }
 
-    // ESC clears selections in inplace command editing mode
+    // ESC clears selections in inplace command editing mode and returns cursor to anchor
     if (event.action != .release and event.key == .escape and self.config.inplace_command_editing) {
         self.renderer_state.mutex.lock();
         defer self.renderer_state.mutex.unlock();
 
         const screen = self.io.terminal.screens.active;
-        if (screen.selection != null) {
+        if (screen.selection) |sel| {
+            // Move cursor back to the selection anchor (where selection started)
+            const anchor = sel.start();
+            const cursor = screen.cursor.page_pin.*;
+
+            // Calculate path from current cursor to anchor and move there
+            if (inputSelectionBounds(screen, cursor)) |bounds| {
+                self.sendInputCursorMove(screen, bounds, cursor, anchor);
+            }
+
             screen.clearSelection();
             self.edit_selection_active = false;
             try self.queueRender();
