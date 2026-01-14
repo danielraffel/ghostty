@@ -2553,7 +2553,16 @@ fn inputSelectionCharacterCount(
 
     const start_index = inputCursorIndex(screen, bounds, start);
     const end_index = inputCursorIndex(screen, bounds, end);
-    return if (end_index >= start_index) end_index - start_index else start_index - end_index;
+    var count = if (end_index >= start_index) end_index - start_index else start_index - end_index;
+
+    // The calculation above uses half-open interval [start, end).
+    // For inclusive end selections (mouse), we need to add 1 to include the end character.
+    // For exclusive end selections (keyboard/shift), the count is already correct.
+    if (!screen.selection_end_exclusive) {
+        count += 1;
+    }
+
+    return count;
 }
 
 fn sendInputCursorMove(
@@ -2690,25 +2699,43 @@ fn stepInputPin(
     };
     if (next_opt) |next| {
         const clamped = clampInputPin(screen, bounds, next);
-        // If moving vertically and we couldn't reach the target row (clamped to
-        // a different row), return the original position since no row change occurred.
-        if ((direction == .up or direction == .down) and
-            (clamped.node != next.node or clamped.y != next.y))
-        {
-            return from;
+
+        // For horizontal movement, just return the clamped position
+        if (direction == .left or direction == .right) {
+            return clampInputPinRow(screen, bounds, clamped);
         }
-        // For vertical movement, use goal_x to preserve the original column
-        // across multiple up/down steps, clamped to the target row's bounds.
-        if ((direction == .up or direction == .down) and goal_x != null) {
-            var result = clamped;
-            result.x = goal_x.?;
-            return clampInputPinRow(screen, bounds, result);
+
+        // For vertical movement, check if we successfully reached the target row
+        if (clamped.node == next.node and clamped.y == next.y) {
+            // We reached the target row - allow movement even if row appears "empty"
+            // (e.g., rows with just newlines from multi-line paste). The row is valid
+            // if it's within input bounds, which clamping already ensures.
+            if (goal_x != null) {
+                var result = clamped;
+                result.x = goal_x.?;
+                return clampInputPinRow(screen, bounds, result);
+            }
+            return clampInputPinRow(screen, bounds, clamped);
         }
-        return clampInputPinRow(screen, bounds, clamped);
+        // If we couldn't reach the target row (clamped to a different row because
+        // target was outside bounds), extend to the start/end of the current row.
+        // This handles shift+up on first line -> go to start, shift+down on last line -> go to end.
+        const ordered = bounds.ordered(screen, .forward);
+        const row_start = inputRowStartCol(from, ordered.start());
+        const row_end = inputRowEndCol(screen, from, bounds);
+        const x: usize = @intCast(from.x);
+        const target_x = if (direction == .up) row_start else row_end;
+        if (x != target_x) {
+            var result = from;
+            result.x = @intCast(target_x);
+            return result;
+        }
+        return from;
     }
 
-    // When we can't move up/down a row (top/bottom of the screen),
-    // still extend to the start/end of the current input row.
+    // When we can't move up/down at all because there's no row to move to
+    // (next_opt is null - at terminal boundary), extend to the start/end
+    // of the current input row.
     if (direction == .up or direction == .down) {
         const ordered = bounds.ordered(screen, .forward);
         const row_start = inputRowStartCol(from, ordered.start());
@@ -3196,6 +3223,20 @@ pub fn keyCallback(
         }
     }
 
+    // ESC clears selections in inplace command editing mode
+    if (event.action != .release and event.key == .escape and self.config.inplace_command_editing) {
+        self.renderer_state.mutex.lock();
+        defer self.renderer_state.mutex.unlock();
+
+        const screen = self.io.terminal.screens.active;
+        if (screen.selection != null) {
+            screen.clearSelection();
+            self.edit_selection_active = false;
+            try self.queueRender();
+            return .consumed;
+        }
+    }
+
     // Handle keybindings first. We need to handle this on all events
     // (press, repeat, release) because a press may perform a binding but
     // a release should not encode if we consumed the press.
@@ -3307,7 +3348,16 @@ pub fn keyCallback(
     {
         self.renderer_state.mutex.lock();
         defer self.renderer_state.mutex.unlock();
-        _ = self.performEditReplacement();
+        if (self.performEditReplacement()) {
+            // Selection was deleted. For backspace/delete keys, we're done -
+            // don't send the key to shell or it would delete an extra character.
+            // For printable characters, continue to send the key so it replaces the selection.
+            const is_delete_key = event.utf8.len == 1 and (event.utf8[0] == 0x7F or event.utf8[0] == 0x08);
+            if (is_delete_key) {
+                try self.queueRender();
+                return .consumed;
+            }
+        }
     }
 
     // Encode and send our key. If we didn't encode anything, then we
@@ -4618,13 +4668,16 @@ pub fn mouseButtonCallback(
 
         // If we have a selection then we do not do click to move because
         // it means that we moved our cursor while pressing the mouse button.
-        // Exception: edit selections (from paste/shift-select) should be
-        // cleared and then we proceed with click-to-move.
-        var cleared_edit_selection = false;
-        if (self.io.terminal.screens.active.selection != null) {
-            if (self.edit_selection_active and plain_click_move) {
-                try self.setSelection(null);
-                cleared_edit_selection = true;
+        // Exception: for plain click-to-move, clear the selection and proceed.
+        // This handles both edit selections and regular selections.
+        var cleared_selection = false;
+        const screen = self.io.terminal.screens.active;
+        if (screen.selection != null) {
+            if (plain_click_move) {
+                screen.clearSelection();
+                self.edit_selection_active = false;
+                try self.queueRender();
+                cleared_selection = true;
                 // Continue with click-to-move logic below
             } else {
                 break :click_move;
@@ -4644,7 +4697,7 @@ pub fn mouseButtonCallback(
             if (target == null) {
                 // If we cleared an edit selection, we handled the click even if
                 // no cursor movement was needed (cursor already at target).
-                if (cleared_edit_selection) return true;
+                if (cleared_selection) return true;
                 break :click_move;
             }
             // Preserve the click count so a second click can select a word.
@@ -4709,11 +4762,13 @@ pub fn mouseButtonCallback(
                     .y = pt_viewport.y,
                 },
             }) orelse {
-                // Weird... our viewport x/y that we just converted isn't
-                // found in our pages. This is probably a bug but we don't
-                // want to crash in releases because its harmless. So, we
-                // only assert in debug mode.
-                if (comptime std.debug.runtime_safety) unreachable;
+                // Click is outside valid content area (e.g., below last row).
+                // Still clear any existing selection before breaking.
+                if (screen.selection != null) {
+                    screen.clearSelection();
+                    self.edit_selection_active = false;
+                    try self.queueRender();
+                }
                 break :click;
             };
 
@@ -4775,8 +4830,11 @@ pub fn mouseButtonCallback(
             // Single click
             1 => {
                 // If we have a selection, clear it. This always happens.
-                if (self.io.terminal.screens.active.selection != null) {
-                    try self.setSelection(null);
+                // Use both clearSelection() and setSelection(null) for robustness.
+                if (screen.selection != null) {
+                    screen.clearSelection();
+                    self.edit_selection_active = false;
+                    try self.queueRender();
                 }
             },
 
@@ -4823,10 +4881,40 @@ pub fn mouseButtonCallback(
 
             // Triple click, select the line under our mouse
             3 => {
-                const sel_ = if (mods.ctrlOrSuper())
-                    self.io.terminal.screens.active.selectOutput(pin.*)
-                else
-                    self.io.terminal.screens.active.selectLine(.{ .pin = pin.* });
+                const sel_: ?terminal.Selection = sel: {
+                    if (mods.ctrlOrSuper()) {
+                        break :sel self.io.terminal.screens.active.selectOutput(pin.*);
+                    }
+
+                    // For inplace command editing, triple-click on input area should
+                    // only select the input text, not the prompt prefix.
+                    if (self.config.inplace_command_editing) {
+                        const active_screen = self.io.terminal.screens.active;
+                        const row = pin.rowAndCell().row;
+                        // Check if we're on an input row (not just prompt)
+                        if (row.semantic_prompt == .input) {
+                            if (row.inputStartCol()) |input_start| {
+                                // Get the line selection first
+                                if (active_screen.selectLine(.{ .pin = pin.* })) |line_sel| {
+                                    // Adjust start to begin at input start column
+                                    const ordered = line_sel.ordered(active_screen, .forward);
+                                    var start = ordered.start();
+                                    const click_row = pin.*;
+                                    // Only adjust if start is on the same row as input_start
+                                    // and before the input start column
+                                    if (start.node == click_row.node and start.y == click_row.y) {
+                                        if (@as(usize, @intCast(start.x)) < input_start) {
+                                            start.x = @intCast(input_start);
+                                        }
+                                    }
+                                    break :sel terminal.Selection.init(start, ordered.end(), false);
+                                }
+                            }
+                        }
+                    }
+
+                    break :sel self.io.terminal.screens.active.selectLine(.{ .pin = pin.* });
+                };
                 if (sel_) |sel| {
                     try self.io.terminal.screens.active.select(sel);
                     self.classifySelection();
@@ -5097,9 +5185,9 @@ fn inputClickMoveTarget(
         return null;
     };
 
-    // Check if click row is within input bounds. We check rows only (not columns)
-    // because clicking past end-of-line should snap to that row's input end,
-    // which clampInputPinRow handles below.
+    // Check if click is within input bounds.
+    // Clicking past end-of-line should snap to that row's input end (handled by clampInputPinRow).
+    // Clicking before input start column returns null (user clicked on prompt, not input).
     const ordered = bounds.ordered(screen, .forward);
     const start_row = ordered.start();
     const end_row = ordered.end();
@@ -5109,12 +5197,15 @@ fn inputClickMoveTarget(
         to.x, to.y, from.x, from.y, start_row.x, start_row.y, end_row.x, end_row.y,
     });
 
-    const to_before_start = to.before(start_row) and
+    // Check if click is on an earlier row than input start
+    const to_before_start_row = to.before(start_row) and
         (to.node != start_row.node or to.y != start_row.y);
+    // Check if click is on the same row as input start but before the input start column
+    const to_before_start_col = (to.node == start_row.node and to.y == start_row.y and to.x < start_row.x);
     const to_after_end = end_row.before(to) and
         (to.node != end_row.node or to.y != end_row.y);
-    if (to_before_start or to_after_end) {
-        log.debug("inputClickMoveTarget: click outside bounds (before={} after={})", .{ to_before_start, to_after_end });
+    if (to_before_start_row or to_before_start_col or to_after_end) {
+        log.debug("inputClickMoveTarget: click outside bounds (before_row={} before_col={} after={})", .{ to_before_start_row, to_before_start_col, to_after_end });
         return null;
     }
 
@@ -7027,15 +7118,71 @@ fn completeClipboardPaste(
 ) !void {
     if (data.len == 0) return;
 
+    // Normalize Unicode line/paragraph separators (U+2028, U+2029) to newlines.
+    // These characters come from rich text editors and web pages but terminals
+    // don't typically handle them, displaying them as <2028> or similar.
+    // UTF-8 encoding: U+2028 = E2 80 A8, U+2029 = E2 80 A9
+    var normalized_data: ?[]u8 = null;
+    defer if (normalized_data) |nd| self.alloc.free(nd);
+
+    const paste_data = paste_data: {
+        // Check if normalization is needed
+        var needs_normalize = false;
+        var i: usize = 0;
+        while (i + 2 < data.len) : (i += 1) {
+            if (data[i] == 0xE2 and data[i + 1] == 0x80 and
+                (data[i + 2] == 0xA8 or data[i + 2] == 0xA9))
+            {
+                needs_normalize = true;
+                break;
+            }
+        }
+
+        if (!needs_normalize) break :paste_data data;
+
+        // Create normalized copy, replacing 3-byte sequences with single \n
+        var result: std.ArrayListUnmanaged(u8) = .empty;
+        errdefer result.deinit(self.alloc);
+
+        i = 0;
+        while (i < data.len) {
+            if (i + 2 < data.len and data[i] == 0xE2 and data[i + 1] == 0x80 and
+                (data[i + 2] == 0xA8 or data[i + 2] == 0xA9))
+            {
+                try result.append(self.alloc, '\n');
+                i += 3;
+            } else {
+                try result.append(self.alloc, data[i]);
+                i += 1;
+            }
+        }
+
+        normalized_data = try result.toOwnedSlice(self.alloc);
+        break :paste_data normalized_data.?;
+    };
+
     const encode_opts: input.paste.Options = encode_opts: {
         self.renderer_state.mutex.lock();
         defer self.renderer_state.mutex.unlock();
 
         if (self.config.inplace_command_editing) {
-            if (self.performEditReplacement()) {
-                // Queue render to clear selection highlighting after replacement
-                try self.queueRender();
-            }
+            // Perform the edit replacement (deletes selected text if any).
+            // This clears selection if present and sends delete sequences.
+            _ = self.performEditReplacement();
+
+            // Ensure selection is fully cleared and screen is marked dirty.
+            // We force dirty.selection = true unconditionally because even if
+            // the selection was already cleared, we need to ensure the renderer
+            // does a full redraw to clear any visual artifacts.
+            const screen = self.io.terminal.screens.active;
+            screen.clearSelection();
+            screen.dirty.selection = true;  // Force dirty even if already null
+            self.edit_selection_active = false;
+
+            // Also set terminal dirty to ensure full redraw
+            self.io.terminal.flags.dirty.clear = true;
+
+            try self.queueRender();
         }
 
         const opts: input.paste.Options = .fromTerminal(&self.io.terminal);
@@ -7058,14 +7205,14 @@ fn completeClipboardPaste(
                 // If we're bracketed and the paste contains and ending
                 // bracket then something naughty might be going on and we
                 // never trust it.
-                if (std.mem.indexOf(u8, data, "\x1B[201~") != null) break :unsafe true;
+                if (std.mem.indexOf(u8, paste_data, "\x1B[201~") != null) break :unsafe true;
 
                 // If we are bracketed and configured to trust that then the
                 // paste is not unsafe.
                 if (self.config.clipboard_paste_bracketed_safe) break :unsafe false;
             }
 
-            break :unsafe !input.paste.isSafe(data);
+            break :unsafe !input.paste.isSafe(paste_data);
         };
 
         if (unsafe) {
@@ -7085,9 +7232,9 @@ fn completeClipboardPaste(
     // Encode the data. In most cases this doesn't require any
     // copies, so we optimize for that case.
     var data_duped: ?[]u8 = null;
-    const vecs = input.paste.encode(data, encode_opts) catch |err| switch (err) {
+    const vecs = input.paste.encode(paste_data, encode_opts) catch |err| switch (err) {
         error.MutableRequired => vecs: {
-            const buf: []u8 = try self.alloc.dupe(u8, data);
+            const buf: []u8 = try self.alloc.dupe(u8, paste_data);
             errdefer self.alloc.free(buf);
             data_duped = buf;
             break :vecs input.paste.encode(buf, encode_opts);
@@ -7105,6 +7252,22 @@ fn completeClipboardPaste(
             vec,
         ), .unlocked);
     };
+
+    // For inplace editing, clear selection again after paste completes
+    // to ensure any lingering selection visual artifacts are removed.
+    if (self.config.inplace_command_editing) {
+        self.renderer_state.mutex.lock();
+        defer self.renderer_state.mutex.unlock();
+
+        // Force full redraw with selection cleared
+        const screen = self.io.terminal.screens.active;
+        screen.clearSelection();
+        screen.dirty.selection = true;  // Force dirty unconditionally
+        self.edit_selection_active = false;
+        self.io.terminal.flags.dirty.clear = true;
+
+        try self.queueRender();
+    }
 }
 
 fn completeClipboardReadOSC52(
@@ -7986,7 +8149,7 @@ test "Surface: inputMoveCount counts empty endpoints" {
     try testing.expectEqual(@as(usize, 2), inputMoveCount(screen, bounds, from_empty, to_text));
 }
 
-test "Surface: inputSelectionCharacterCount is half-open" {
+test "Surface: inputSelectionCharacterCount is half-open for shift selections" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
@@ -8005,7 +8168,14 @@ test "Surface: inputSelectionCharacterCount is half-open" {
         t.screens.active.pages.pin(.{ .active = .{ .x = 2, .y = 0 } }).?,
         false,
     );
+
+    // For shift/keyboard selections (end-exclusive), count is half-open [start, end)
+    t.screens.active.selection_end_exclusive = true;
     try testing.expectEqual(@as(usize, 1), inputSelectionCharacterCount(t.screens.active, sel));
+
+    // For mouse selections (inclusive), count includes the end character
+    t.screens.active.selection_end_exclusive = false;
+    try testing.expectEqual(@as(usize, 2), inputSelectionCharacterCount(t.screens.active, sel));
 }
 
 test "Surface: inputMoveCount treats hard newline as single move" {
