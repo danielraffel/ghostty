@@ -1,0 +1,9 @@
+# Secrets
+.env
+
+# Build artifacts
+*.profraw
+output/
+
+# Editor/OS files
+.DS_Store

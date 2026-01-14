@@ -25,48 +25,46 @@ Inplace command editing allows users to edit shell commands directly in the term
 4. **Render state cleanup** - Clear `row_sels` when selection is null to prevent stale highlighting
    - File: `src/terminal/render.zig` lines 647-653
 
+5. **Click-to-Deselect** - RESOLVED
+   - Fix: Plain click now clears any selection (not just edit selections)
+   - Changed `mouseButtonCallback()` to call `screen.clearSelection()` directly with `queueRender()`
+   - File: `src/Surface.zig` in `mouseButtonCallback()`
+
+6. **Paste-Replace Bug** - RESOLVED
+   - Fix: Backspace/delete with selection now deletes selection without sending extra key to shell
+   - Added check for delete keys in `keyCallback()` after `performEditReplacement()`
+   - File: `src/Surface.zig` lines ~3348-3358
+
+7. **Triple-Click Selecting Prompt** - RESOLVED
+   - `selectPrompt()` properly handles input-only selection within bounds
+
+8. **Shift+Down/Up Selection Limit** - RESOLVED
+   - Fix: Shift+up on first line extends to beginning, shift+down on last line extends to end
+   - Modified `stepInputPin()` to handle boundary cases when target row is outside input bounds
+   - Vertical navigation through multi-line input (with newlines from paste) now works correctly
+   - File: `src/Surface.zig` in `stepInputPin()`
+
+9. **ESC clears selection** - NEW FEATURE
+   - ESC key now clears selections in inplace command editing mode
+   - File: `src/Surface.zig` in `keyCallback()`
+
+10. **Unicode Line Separator (U+2028/U+2029)** - RESOLVED
+    - Paste now normalizes Unicode LINE SEPARATOR (U+2028) and PARAGRAPH SEPARATOR (U+2029) to newlines
+    - These characters display as `<2028>` in terminals; converting to `\n` provides expected line break behavior
+    - File: `src/Surface.zig` in `completeClipboardPaste()`
+
 ## Outstanding Issues
 
-### 1. Click-to-Deselect Not Working
+### 1. Paste Leaves Text Highlighted
 
-**Symptom**: After making a selection (shift+arrows or paste highlighting), clicking outside the selection does NOT clear the highlight.
+**Symptom**: After pasting text to replace a selection, the pasted text remains highlighted until the next action.
 
-**Attempted Fixes**:
-- Added `queueRender()` after `performEditReplacement()` in `completeClipboardPaste()` - did not resolve
-- The `row_sels` clearing in render.zig should handle this, but something else may be preventing selection from being set to null
+**Current Status**: Under investigation. The `dirty.selection` flag is being forced to true, but the highlight may persist for other reasons.
 
 **Investigation Needed**:
-- Check if `setSelection(null)` is being called on click
-- Check if selection is actually being cleared but render not triggered
-- May need to trace click handling flow in `leftClickPress()` and `primaryClick()`
-
-### 2. Paste-Replace Bug ("only" → "onlyy")
-
-**Symptom**: When selecting text and pasting to replace, an extra character appears at the end.
-
-**Investigation Needed**:
-- Review `performEditReplacement()` logic
-- Check `generateEditSequence()` for off-by-one errors
-- May be related to selection bounds calculation
-
-### 3. Triple-Click Selecting Prompt Instead of Input
-
-**Symptom**: Triple-clicking sometimes selects the prompt text instead of just the input area.
-
-**Investigation Needed**:
-- Review `selectPrompt()` function
-- Check semantic prompt boundary handling
-- May need to restrict selection to `.input` semantic type only
-
-### 4. Shift+Down Selection Limit
-
-**Symptom**: Cannot select all the way to the end of multi-line input using shift+down.
-
-**Attempted Fixes**:
-- Modified `handlePromptSelectionShift()` to use `sel.bottomRight(screen)` for bounds calculation
-- This may need further testing/refinement
-
-**Code Location**: `src/Surface.zig` lines 2747-2758
+- Verify that `clearSelection()` is being called correctly after paste
+- Check if render is being triggered properly
+- May need to trace the full paste-replace flow
 
 ## Key Files
 
@@ -82,6 +80,7 @@ Inplace command editing allows users to edit shell commands directly in the term
 | Function | Location | Purpose |
 |----------|----------|---------|
 | `handlePromptSelectionShift()` | Surface.zig:2680 | Shift+arrow selection handling |
+| `stepInputPin()` | Surface.zig:~2693 | Step cursor within input bounds |
 | `inputSelectionBounds()` | Surface.zig:2947 | Calculate valid selection region |
 | `performEditReplacement()` | Surface.zig:5085 | Replace selection with clipboard content |
 | `selectWord()` | Screen.zig:2561 | Word selection on double-click |
