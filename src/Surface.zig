@@ -3229,6 +3229,11 @@ pub fn keyCallback(
         defer self.renderer_state.mutex.unlock();
 
         const screen = self.io.terminal.screens.active;
+        log.debug("ESC handler: selection={} composing={} preedit={}", .{
+            screen.selection != null,
+            event.composing,
+            self.renderer_state.preedit != null,
+        });
         if (screen.selection) |sel| {
             // Move cursor back to the selection anchor (where selection started)
             const anchor = sel.start();
@@ -3239,7 +3244,9 @@ pub fn keyCallback(
                 self.sendInputCursorMove(screen, bounds, cursor, anchor);
             }
 
-            screen.clearSelection();
+            // Use setSelection(null) for complete cleanup (not just clearSelection)
+            // This ensures all selection state is properly synchronized
+            try self.setSelection(null);
             self.edit_selection_active = false;
             try self.queueRender();
             return .consumed;
@@ -4658,6 +4665,7 @@ pub fn mouseButtonCallback(
         }
     }
 
+
     const alt_click_move = mods.alt and self.config.cursor_click_to_move;
     const plain_click_move = self.config.cursor_click_to_move_input and
         mods.withoutLocks().empty();
@@ -4683,6 +4691,10 @@ pub fn mouseButtonCallback(
         const screen = self.io.terminal.screens.active;
         if (screen.selection != null) {
             if (plain_click_move) {
+                // For edit selections from drag, preserve the selection instead of clearing
+                if (self.edit_selection_active and self.mouse.left_click_count == 1) {
+                    break :click_move;
+                }
                 screen.clearSelection();
                 self.edit_selection_active = false;
                 try self.queueRender();
@@ -4835,12 +4847,14 @@ pub fn mouseButtonCallback(
         // `setSelection` because we want to avoid copying the selection
         // to the selection clipboard. For left mouse clicks we only set
         // the clipboard on release.
+        log.debug("click: count={} selection={}", .{ self.mouse.left_click_count, screen.selection != null });
         switch (self.mouse.left_click_count) {
             // Single click
             1 => {
                 // If we have a selection, clear it. This always happens.
                 // Use both clearSelection() and setSelection(null) for robustness.
                 if (screen.selection != null) {
+                    log.debug("click: clearing selection", .{});
                     screen.clearSelection();
                     self.edit_selection_active = false;
                     try self.queueRender();
@@ -5108,8 +5122,18 @@ fn performEditReplacement(self: *Surface) bool {
     const ordered = sel.ordered(screen, .forward);
     const cursor = screen.cursor.page_pin.*;
     const bounds = inputSelectionBounds(screen, cursor) orelse return false;
+    log.debug("performEditReplacement: sel_start_x={} sel_end_x={} cursor_x={}", .{
+        ordered.start().x,
+        ordered.end().x,
+        cursor.x,
+    });
     self.sendInputCursorMove(screen, bounds, cursor, ordered.start());
-    self.sendDeleteSequences(inputSelectionCharacterCount(screen, sel));
+    const char_count = inputSelectionCharacterCount(screen, sel);
+    log.debug("performEditReplacement: char_count={} selection_end_exclusive={}", .{
+        char_count,
+        screen.selection_end_exclusive,
+    });
+    self.sendDeleteSequences(char_count);
 
     screen.clearSelection();
     self.edit_selection_active = false;
@@ -5323,6 +5347,12 @@ fn clickMoveCursorInputOrEnd(self: *Surface, to: terminal.Pin) !void {
     if (from.y > bounds_end.y or (from.y == bounds_end.y and from.x > input_end.x)) {
         // Send Ctrl+E (end of line) to move cursor to end of input
         self.queueIo(.{ .write_stable = "\x05" }, .locked);
+
+        // Ensure any stale selection visual artifacts are cleared
+        screen.clearSelection();
+        screen.dirty.selection = true;
+        self.edit_selection_active = false;
+        self.queueRender() catch {};
         return;
     }
 
@@ -5825,7 +5855,9 @@ fn dragLeftClickSingle(
     drag_pin: terminal.Pin,
     drag_x: f64,
 ) !void {
-    // This logic is in a separate function so that it can be unit tested.
+    // Use the standard mouseSelection logic which handles threshold calculations
+    // properly. The classifySelection() call will mark it as an edit selection
+    // if it falls within input bounds.
     try self.io.terminal.screens.active.select(mouseSelection(
         self.mouse.left_click_pin.?.*,
         drag_pin,
@@ -7175,20 +7207,16 @@ fn completeClipboardPaste(
         defer self.renderer_state.mutex.unlock();
 
         if (self.config.inplace_command_editing) {
+            const screen = self.io.terminal.screens.active;
+
             // Perform the edit replacement (deletes selected text if any).
             // This clears selection if present and sends delete sequences.
             _ = self.performEditReplacement();
 
             // Ensure selection is fully cleared and screen is marked dirty.
-            // We force dirty.selection = true unconditionally because even if
-            // the selection was already cleared, we need to ensure the renderer
-            // does a full redraw to clear any visual artifacts.
-            const screen = self.io.terminal.screens.active;
             screen.clearSelection();
-            screen.dirty.selection = true;  // Force dirty even if already null
+            screen.dirty.selection = true;
             self.edit_selection_active = false;
-
-            // Also set terminal dirty to ensure full redraw
             self.io.terminal.flags.dirty.clear = true;
 
             try self.queueRender();
@@ -7271,9 +7299,30 @@ fn completeClipboardPaste(
         // Force full redraw with selection cleared
         const screen = self.io.terminal.screens.active;
         screen.clearSelection();
-        screen.dirty.selection = true;  // Force dirty unconditionally
+        screen.dirty.selection = true;
         self.edit_selection_active = false;
         self.io.terminal.flags.dirty.clear = true;
+
+        // Mark all viewport pages as dirty to ensure visual refresh.
+        // This is a brute-force approach to clear any stale selection highlight.
+        const viewport_tl = screen.pages.getTopLeft(.viewport);
+        var page_it = screen.pages.pageIterator(.right_down, .{ .viewport = .{} }, null);
+        while (page_it.next()) |chunk| {
+            chunk.node.data.dirty = true;
+        }
+        _ = viewport_tl; // Silence unused variable warning
+
+        // Reset mouse state to prevent drag functions from recreating selection.
+        // If left_click_count > 0 from a previous interaction, mouse movement
+        // would trigger dragLeftClickSingle/Double/Triple which calls select().
+        if (self.mouse.left_click_pin) |prev| {
+            if (self.io.terminal.screens.get(self.mouse.left_click_screen)) |pin_screen| {
+                pin_screen.pages.untrackPin(prev);
+            }
+            self.mouse.left_click_pin = null;
+        }
+        self.mouse.left_click_count = 0;
+        log.debug("paste phase2: reset mouse state", .{});
 
         try self.queueRender();
     }

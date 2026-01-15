@@ -656,6 +656,15 @@ pub const RenderState = struct {
             // This is necessary because the selection block above is only entered when
             // s.selection is non-null, leaving old selection values in row_sels.
             @memset(row_sels, null);
+            // If we previously had a selection (selection_cache exists), we need to
+            // force a full rebuild so the renderer clears the visual highlight.
+            // Without this, rows won't be re-rendered because they're not individually dirty.
+            if (self.selection_cache != null) {
+                self.dirty = .full;
+                // Also mark all rows as dirty to ensure they get rebuilt even if
+                // the renderer doesn't do a full rebuild for some reason.
+                @memset(row_dirties, true);
+            }
             self.selection_cache = null;
         }
 

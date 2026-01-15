@@ -2243,6 +2243,7 @@ pub fn cursorSetHyperlink(self: *Screen) !void {
 /// managing memory for you, it also performs safety checks that the selection
 /// is always tracked.
 pub fn select(self: *Screen, sel_: ?Selection) !void {
+    log.debug("select: new={}", .{sel_ != null});
     const sel = sel_ orelse {
         self.clearSelection();
         return;
@@ -2262,13 +2263,16 @@ pub fn select(self: *Screen, sel_: ?Selection) !void {
 
 /// Same as select(null) but can't fail.
 pub fn clearSelection(self: *Screen) void {
+    log.debug("clearSelection: had={}", .{self.selection != null});
     if (self.selection) |*sel| {
         sel.deinit(self);
-        self.dirty.selection = true;
     }
     self.selection = null;
     self.selection_is_edit = false;
     self.selection_end_exclusive = false;
+    // Always set dirty to ensure visual artifacts are cleared
+    // even if selection was already null (e.g., after paste)
+    self.dirty.selection = true;
 }
 
 pub const SelectionString = struct {

@@ -1959,8 +1959,6 @@ extension Ghostty.SurfaceView: NSTextInputClient {
         default:
             break
         }
-
-        print("SEL: \(selector)")
     }
 
     /// Sync the preedit state based on the markedText value to libghostty

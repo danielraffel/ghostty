@@ -2485,6 +2485,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 state.rows,
                 self.cells.size.rows,
             );
+
             for (
                 0..,
                 row_raws[0..row_len],
