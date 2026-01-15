@@ -1,4 +1,27 @@
-# Inplace Command Editing - Remaining Issues
+# Inplace Command Editing - Status
+
+## 01/14/26 — Input Selection Demo in Ghostty
+
+### Working Features
+
+1. **Double-click word selection**
+2. **Triple-click line selection**
+3. **Mouse drag selection** (in-place editing)
+4. **Shift + Arrow selection**
+5. **Shift + Up / Down multi-line selection**
+6. **Click-to-move cursor**
+7. **ESC clears selection**
+8. **Delete / Backspace with selection**
+
+### Known Issues
+
+1. **Paste leaves selection highlighted**
+   - After pasting, the selection highlight remains
+   - Highlighted content cannot be deleted
+   - Clicking before the highlighted text deselects it and places the cursor correctly
+   - Clicking outside the text or at the bottom does not move the cursor to the end of the input
+
+---
 
 ## Feature Overview
 
@@ -11,7 +34,7 @@ Inplace command editing allows users to edit shell commands directly in the term
 - **Bounds Calculation**: `inputSelectionBounds()` determines the valid selection region within prompt input
 - **Click-to-Move**: Clicking within prompt input moves cursor to that position
 
-## Working Features
+## Implementation History
 
 1. **Double-click word selection** - Fixed by checking if click is on word character before trying URL/link detection. Prevents path regex from matching text like "/triple click" when clicking on "click".
    - File: `src/Surface.zig` lines 4783-4816
@@ -53,18 +76,10 @@ Inplace command editing allows users to edit shell commands directly in the term
     - These characters display as `<2028>` in terminals; converting to `\n` provides expected line break behavior
     - File: `src/Surface.zig` in `completeClipboardPaste()`
 
-## Outstanding Issues
-
-### 1. Paste Leaves Text Highlighted
-
-**Symptom**: After pasting text to replace a selection, the pasted text remains highlighted until the next action.
-
-**Current Status**: Under investigation. The `dirty.selection` flag is being forced to true, but the highlight may persist for other reasons.
-
-**Investigation Needed**:
-- Verify that `clearSelection()` is being called correctly after paste
-- Check if render is being triggered properly
-- May need to trace the full paste-replace flow
+11. **Mouse drag selection** - NEW FEATURE (01/14/26)
+    - Added mouse drag selection for inplace command editing
+    - Selection preserved on mouse release (not cleared by click-to-move)
+    - File: `src/Surface.zig` in `mouseButtonCallback()` click_move block
 
 ## Key Files
 
